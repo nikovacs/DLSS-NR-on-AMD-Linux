@@ -718,12 +718,14 @@ static void stub_unreg_fat(void **m) {
         return;
     real.p___hipUnregisterFatBinary(m);
 }
+static void nrp_note_name(const void *f, const char *name); /* nr_profile.c */
 static void stub_reg_fn(void **mo, const void *hf, char *df, const char *dn, unsigned int tl, void *tid,
                         void *bid, void *bd, void *gd, int *ws) {
     if (ensure_hip() || !real.p___hipRegisterFunction)
         return;
     real.p___hipRegisterFunction(mo, hf, df, dn, tl, tid, bid, bd, gd, ws);
     if (dn && hf) {
+        nrp_note_name(hf, dn);
 #ifdef DLSSNR_ACTIVE_C32
         c32_register(hf,dn);
 #else
@@ -843,6 +845,7 @@ static int stub_memset_async(void *d, int v, u64 n, void *st) {
  * queue) — never sync there. hipEventSynchronize on the last recorded event
  * plus a D2H of the output mapping waits for compute writing that dma-buf. */
 #include "nr_ordered.c"
+#include "nr_profile.c"
 
 static int stub_launch(const void *f, dim3_t nb, dim3_t db, void **a, u64 sh, void *st) {
     int e;
@@ -853,8 +856,11 @@ static int stub_launch(const void *f, dim3_t nb, dim3_t db, void **a, u64 sh, vo
     /* Do not launch HIP k_flag_wait first on the null stream: it would spin
      * before NR kernels and deadlock. Do not DeviceSynchronize here either
      * (queue still empty → 0 ms, then kernels run after residual). */
-    if (nr_is_role(NR_ROLE_FLAG_WAIT, f))
-        return nr_begin_job(a, st);
+    if (nr_is_role(NR_ROLE_FLAG_WAIT, f)) {
+        int begun = nr_begin_job(a, st);
+        if (!begun) nrp_job_begin();
+        return begun;
+    }
     if (nr_job.error)
         return nr_job.error;
     if (nr_is_role(NR_ROLE_IMPORT, f) && !nr_job.active)
@@ -880,7 +886,9 @@ static int stub_launch(const void *f, dim3_t nb, dim3_t db, void **a, u64 sh, vo
         e = real.p_hipLaunchKernel(f, nb, db, a, sh, st);
         if (e) return nr_job_error(e);
         if (!real.p_hipStreamSynchronize) return nr_job_error(3);
-        return nr_complete_job(real.p_hipStreamSynchronize(st));
+        int completed = nr_complete_job(real.p_hipStreamSynchronize(st));
+        nrp_job_end(completed == 0);
+        return completed;
     }
     if (g_nlaunch_log < 24) {
         g_nlaunch_log++;
@@ -889,7 +897,7 @@ static int stub_launch(const void *f, dim3_t nb, dim3_t db, void **a, u64 sh, vo
     }
     if (c32_requested() && f==c32_original && nr_job.active) c32_frame(nr_job.token,nr_job.frame);
     if (!c32_try_launch(f,nb,db,a,sh,st,&e))
-        e = real.p_hipLaunchKernel(f, nb, db, a, sh, st);
+        e = nr_job.active ? nrp_launch(f, nb, db, a, sh, st) : real.p_hipLaunchKernel(f, nb, db, a, sh, st);
     if (e && nr_job.active)
         return nr_job_error(e);
     return e;

@@ -22,7 +22,7 @@ PACKAGE_FILES = (
     'dlssnr/assets.py', 'dlssnr/cli.py', 'dlssnr/conversion.py', 'dlssnr/lmxxf.py', 'dlssnr/numpy-wheels.json',
     'dlssnr/launch_support.py', 'dlssnr/deploy.py', 'dlssnr/legacy_converter.py', 'dlssnr/games.py', 'dlssnr/runtime.py', 'dlssnr/upstream.py',
     'native/hip_bridge.c', 'native/hip_bridge.h', 'native/nr_ordered.c', 'native/nr_ordered.h',
-    'native/c32_prepack.c', 'native/c32_offsets.inc', 'native/active_c32.c',
+    'native/c32_prepack.c', 'native/c32_offsets.inc', 'native/active_c32.c', 'native/nr_profile.c',
     'sources/README.md', 'sources/fetch_vkd3d.py', 'sources/cross-win64.ini',
     'sources/vkd3d-submodules.json', 'sources/vkd3d-proton-ordered.patch',
     'sources/trampoline/amdhip64_7_pe.c', 'sources/trampoline/hip_bridge.h',
