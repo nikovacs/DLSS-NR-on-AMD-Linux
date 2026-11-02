@@ -22,8 +22,30 @@ __declspec(dllimport) BOOL __stdcall WriteFile(HANDLE h, const void *buf, DWORD 
 __declspec(dllimport) BOOL __stdcall CloseHandle(HANDLE h);
 __declspec(dllimport) HANDLE __stdcall LoadLibraryA(const char *name);
 __declspec(dllimport) void *__stdcall GetProcAddress(HANDLE module, const char *name);
+__declspec(dllimport) HANDLE __stdcall GetModuleHandleA(const char *name);
+__declspec(dllimport) DWORD __stdcall GetModuleFileNameA(HANDLE module, char *buf, DWORD size);
+__declspec(dllimport) BOOL __stdcall GetModuleHandleExA(DWORD flags, const char *name, HANDLE *module);
+__declspec(dllimport) BOOL __stdcall VirtualProtect(void *addr, unsigned long long size, DWORD prot, DWORD *old);
+__declspec(dllimport) void *__stdcall VirtualAlloc(void *addr, unsigned long long size, DWORD type, DWORD prot);
+__declspec(dllimport) BOOL __stdcall FlushInstructionCache(HANDLE process, const void *addr, unsigned long long size);
 
 static DlssnrHipBridge *g;
+
+/* No C runtime (/nodefaultlib): the compiler may still emit memcpy/memset for byte loops.
+ * Volatile accesses keep these from being turned back into calls to themselves.
+ * (Only in the PE build; host-side test harnesses link the C library.) */
+#ifdef _WIN32
+void *memcpy(void *dst, const void *src, unsigned long long n) {
+    volatile unsigned char *d = dst; const volatile unsigned char *s = src;
+    while (n--) *d++ = *s++;
+    return dst;
+}
+void *memset(void *dst, int c, unsigned long long n) {
+    volatile unsigned char *d = dst;
+    while (n--) *d++ = (unsigned char)c;
+    return dst;
+}
+#endif
 
 static unsigned long long parse_hex_ptr(const char *s) {
     unsigned long long v = 0;
@@ -50,8 +72,23 @@ static int bridge_ok(void) {
     return g && g->magic == DLSSNR_HIP_MAGIC;
 }
 
+static HANDLE g_self;
+/* dlssnr_pe.log beside this DLL (the game folder): visible from the host, unlike the
+ * container's private /tmp under Flatpak Steam. Falls back to Z:\\tmp. */
 static void pe_log(const char *s, unsigned n) {
-    HANDLE h = CreateFileA("Z:\\tmp\\dlssnr-pe.log", GENERIC_WRITE, 0, 0, CREATE_ALWAYS,
+    char path[600];
+    DWORD len = g_self ? GetModuleFileNameA(g_self, path, sizeof(path) - 16) : 0;
+    while (len && path[len - 1] != '\\' && path[len - 1] != '/') --len;
+    if (len) {
+        const char *name = "dlssnr_pe.log";
+        for (unsigned i = 0; name[i]; ++i) path[len++] = name[i];
+        path[len] = 0;
+    } else {
+        const char *fallback = "Z:\\tmp\\dlssnr-pe.log";
+        for (len = 0; fallback[len]; ++len) path[len] = fallback[len];
+        path[len] = 0;
+    }
+    HANDLE h = CreateFileA(path, GENERIC_WRITE, 0, 0, CREATE_ALWAYS,
                            FILE_ATTRIBUTE_NORMAL, 0);
     if (h == INVALID_HANDLE_VALUE)
         return;
@@ -86,11 +123,103 @@ static void init_bridge(void) {
     pe_log(msg, 10 + i);
 }
 
+
+/* Upstream 0.8.0 (NeuralHub host) under Wine: loader-lock deadlock guard.
+ *
+ * The host detours LoadLibraryExW twice (its FSR/FFX and XeSS interceptors). Each detour
+ * calls the original and then inspects the newly loaded module under the host's own
+ * synchronisation. When a DLL's startup code (PROCESS_ATTACH, i.e. with the loader lock
+ * held) calls LoadLibraryExW, the detour runs under the loader lock and waits for the host;
+ * meanwhile the host thread, holding that, calls module lookups (GetModuleHandle*, ...).
+ * On Windows 8+ those lookups do not take the loader lock; Wine's do, so both threads wait
+ * forever (seen in Hogwarts Legacy: Wwise plugin DllMain vs the host's interceptor setup).
+ *
+ * Guard: when the calling thread already owns the loader lock, the detour is skipped and
+ * the original LoadLibraryExW (the pointer the host saved) is called directly. All other
+ * calls, including the game loading its FSR/XeSS DLLs, run the host's detour unchanged.
+ * Applied in memory only, to the exact pinned build: every patch site's bytes must match,
+ * otherwise nothing is changed. The host's DLL file is never modified. */
+#define NH080_SIZE_OF_IMAGE 0x06139000u
+struct nh_site {
+    u64 detour_rva, orig_slot_rva;
+    unsigned len;                /* prologue bytes moved (whole instructions, position-independent) */
+    unsigned char prologue[16];
+    unsigned char *cont;         /* moved prologue + jump back into the detour */
+    void **orig_slot;
+};
+static struct nh_site nh_sites[2] = {
+    /* XeSS interceptor's LoadLibraryExW detour */
+    {0x57500, 0x1a03968, 16, {0x55,0x41,0x57,0x41,0x56,0x41,0x55,0x41,0x54,0x56,0x57,0x53,0x48,0x83,0xec,0x48}, 0, 0},
+    /* FSR/FFX interceptor's LoadLibraryExW detour */
+    {0x1b1a0, 0x1a01d48, 14, {0x55,0x41,0x57,0x41,0x56,0x41,0x54,0x56,0x57,0x53,0x48,0x83,0xec,0x50}, 0, 0},
+};
+typedef void *(__stdcall *load_library_ex_w)(const void *name, void *file, DWORD flags);
+
+static int loader_lock_held(void) {
+    unsigned char *peb, *teb;
+    __asm__ volatile("movq %%gs:0x60, %0" : "=r"(peb));
+    __asm__ volatile("movq %%gs:0x30, %0" : "=r"(teb));
+    unsigned char *lock = *(unsigned char **)(peb + 0x110);          /* PEB->LoaderLock */
+    if (!lock) return 0;
+    return *(void **)(lock + 0x10) == *(void **)(teb + 0x48);       /* OwningThread == ClientId.UniqueThread */
+}
+static void *__stdcall nh_guard_xess(const void *name, void *file, DWORD flags) {
+    if (loader_lock_held()) return ((load_library_ex_w)*nh_sites[0].orig_slot)(name, file, flags);
+    return ((load_library_ex_w)(void *)nh_sites[0].cont)(name, file, flags);
+}
+static void *__stdcall nh_guard_ffx(const void *name, void *file, DWORD flags) {
+    if (loader_lock_held()) return ((load_library_ex_w)*nh_sites[1].orig_slot)(name, file, flags);
+    return ((load_library_ex_w)(void *)nh_sites[1].cont)(name, file, flags);
+}
+static void put_jump(unsigned char *at, const void *target) {   /* jmp qword ptr [rip+0]; dq target (14 bytes) */
+    unsigned long long t = (unsigned long long)target;
+    at[0] = 0xff; at[1] = 0x25; at[2] = at[3] = at[4] = at[5] = 0;
+    for (int i = 0; i < 8; ++i) at[6 + i] = (unsigned char)(t >> (8 * i));
+}
+static const char *install_nh080_guard(void) {
+    unsigned char *base = (unsigned char *)GetModuleHandleA("neuralhub_host.dll");
+    if (!base) return "loaderlock-guard: no neuralhub_host.dll";
+    unsigned char *nt = base + *(unsigned int *)(base + 0x3c);
+    if (*(unsigned int *)nt != 0x4550 || *(unsigned int *)(nt + 0x50) != NH080_SIZE_OF_IMAGE)
+        return "loaderlock-guard: other host build, not applied";
+    for (unsigned i = 0; i < 2; ++i)
+        for (unsigned k = 0; k < nh_sites[i].len; ++k)
+            if (base[nh_sites[i].detour_rva + k] != nh_sites[i].prologue[k])
+                return "loaderlock-guard: detour bytes differ (already patched or other build), not applied";
+    unsigned char *mem = VirtualAlloc(0, 4096, 0x3000 /* MEM_COMMIT|MEM_RESERVE */, 0x40 /* PAGE_EXECUTE_READWRITE */);
+    if (!mem) return "loaderlock-guard: VirtualAlloc failed";
+    void *stubs[2] = {(void *)nh_guard_xess, (void *)nh_guard_ffx};
+    for (unsigned i = 0; i < 2; ++i) {
+        struct nh_site *site = &nh_sites[i];
+        unsigned char *detour = base + site->detour_rva;
+        site->orig_slot = (void **)(base + site->orig_slot_rva);
+        site->cont = mem + 64 * i;
+        for (unsigned k = 0; k < site->len; ++k) site->cont[k] = site->prologue[k];
+        put_jump(site->cont + site->len, detour + site->len);
+        DWORD old = 0;
+        if (!VirtualProtect(detour, 16, 0x40, &old)) return "loaderlock-guard: VirtualProtect failed";
+        put_jump(detour, stubs[i]);
+        for (unsigned k = 14; k < site->len; ++k) detour[k] = 0x90;   /* nop the moved tail */
+        VirtualProtect(detour, 16, old, &old);
+    }
+    FlushInstructionCache((HANDLE)(long long)-1, base, NH080_SIZE_OF_IMAGE);
+    /* The host's detours now jump into this DLL: never let it unload (AMDNR may free a
+     * probe copy). GET_MODULE_HANDLE_EX_FLAG_PIN | FROM_ADDRESS. */
+    HANDLE self = 0;
+    GetModuleHandleExA(0x1 | 0x4, (const char *)(void *)nh_guard_xess, &self);
+    return "loaderlock-guard: applied to the 0.8.0 host (2 LoadLibraryExW detours); module pinned";
+}
+
 BOOL __stdcall DllMain(void *h, DWORD reason, void *r) {
-    (void)h;
     (void)r;
-    if (reason == DLL_PROCESS_ATTACH)
+    if (reason == DLL_PROCESS_ATTACH) {
+        g_self = h;
         init_bridge();
+        const char *g = install_nh080_guard();
+        unsigned n = 0;
+        while (g[n]) ++n;
+        pe_log(g, n);
+    }
     return 1;
 }
 

@@ -1,4 +1,5 @@
 """Upstream 0.8.0 (NeuralHub host) support: HIP functions resolved by name, bridge ABI 6."""
+import os
 from pathlib import Path
 import re
 import shutil
@@ -81,6 +82,45 @@ class Vkd3dOrderedContract(unittest.TestCase):
         added = [line[1:] for line in patch.split('diff --git a/libs/vkd3d/nr_ordered_commands.h')[1].split('diff --git')[0].splitlines()
                  if line.startswith('+') and not line.startswith('+++')]
         self.assertEqual('\n'.join(added).strip(), header.strip())
+
+
+class LoaderLockGuard(unittest.TestCase):
+    """The trampoline's in-memory guard for the 0.8.0 host must match that exact build."""
+    def _sites(self):
+        src = (ROOT/'sources/trampoline/amdhip64_7_pe.c').read_text()
+        sites = re.findall(r'\{0x([0-9a-f]+), 0x([0-9a-f]+), (\d+), \{([0-9a-fx,]+)\}, 0, 0\}', src)
+        self.assertEqual(len(sites), 2)
+        size = int(re.search(r'#define NH080_SIZE_OF_IMAGE (0x[0-9a-f]+)u', src).group(1), 16)
+        return [(int(r, 16), int(slot, 16), int(n), bytes(int(b, 16) for b in bs.split(','))) for r, slot, n, bs in sites], size
+
+    def test_sites_are_whole_position_independent_prologues(self):
+        sites, _ = self._sites()
+        for rva, slot, n, prologue in sites:
+            self.assertEqual(len(prologue), n)
+            self.assertGreaterEqual(n, 14)                       # room for the 14-byte absolute jump
+            self.assertEqual(prologue[:1], b'\x55')              # push rbp: a function entry
+            self.assertNotIn(b'\x8d\x05', prologue)             # no RIP-relative operand moved
+
+    @unittest.skipUnless(os.environ.get('DLSSNR_HOST_080'), 'set DLSSNR_HOST_080 to neuralhub_host.dll 0.8.0')
+    def test_sites_match_the_pinned_host(self):
+        import struct
+        data = Path(os.environ['DLSSNR_HOST_080']).read_bytes()
+        sites, size = self._sites()
+        pe = struct.unpack_from('<I', data, 0x3c)[0]
+        self.assertEqual(struct.unpack_from('<I', data, pe + 24 + 56)[0], size)
+        nsec = struct.unpack_from('<H', data, pe + 6)[0]; opt = struct.unpack_from('<H', data, pe + 20)[0]
+        def off(rva):
+            for i in range(nsec):
+                s = pe + 24 + opt + 40 * i
+                vsz, va, rsz, rp = struct.unpack_from('<IIII', data, s + 8)
+                if va <= rva < va + max(vsz, rsz): return rva - va + rp
+        for rva, slot, n, prologue in sites:
+            self.assertEqual(data[off(rva):off(rva) + n], prologue)
+            # The detour calls the original through the saved slot right after its prologue.
+            body = data[off(rva):off(rva) + 0x40]
+            disp_at = body.index(b'\xff\x15') + 2
+            disp = struct.unpack_from('<i', body, disp_at)[0]
+            self.assertEqual(rva + disp_at + 4 + disp, slot)
 
 
 if __name__ == '__main__':

@@ -6,3 +6,9 @@ WriteFile
 CloseHandle
 LoadLibraryA
 GetProcAddress
+GetModuleHandleA
+VirtualProtect
+VirtualAlloc
+FlushInstructionCache
+GetModuleFileNameA
+GetModuleHandleExA
