@@ -36,9 +36,44 @@ REQUIRED_SYMBOLS = (
     'hipExternalMemoryGetMappedBuffer', 'hipDestroyExternalMemory',
 )
 WHEEL_VERSION = '7.14.0a20260612'
-WHEEL_URL = ('https://rocm.nightlies.amd.com/v2/gfx120X-all/'
-             'rocm_sdk_core-7.14.0a20260612-py3-none-linux_x86_64.whl')
-WHEEL_SHA256 = '15e800e79a1d510b7cb04e577e9da48aafd5d654191d82f63c19d882f979abd7'
+_WHEEL_NAME = 'rocm_sdk_core-7.14.0a20260612-py3-none-linux_x86_64.whl'
+# AMD publishes one core wheel per GPU family. Same ROCm version for all, pinned by digest.
+WHEELS = {
+    'gfx103X-all': '3f681d264bf8f04cd6b3b6131066f1ae1aaf5bd4d0e76817428acf1455d6fd06',  # RDNA2
+    'gfx110X-all': 'b6023d4b204f262714983c953e0c439061e449b2c84143314f0b9c0813f53f47',  # RDNA3
+    'gfx120X-all': '15e800e79a1d510b7cb04e577e9da48aafd5d654191d82f63c19d882f979abd7',  # RDNA4
+}
+DEFAULT_WHEEL_FAMILY = 'gfx120X-all'
+WHEEL_URL = f'https://rocm.nightlies.amd.com/v2/{DEFAULT_WHEEL_FAMILY}/{_WHEEL_NAME}'
+WHEEL_SHA256 = WHEELS[DEFAULT_WHEEL_FAMILY]
+
+
+def wheel_family(target_version: int) -> str | None:
+    """Map KFD gfx_target_version (e.g. 100300 = gfx1030) to AMD's wheel family."""
+    major, minor = target_version // 10000, (target_version // 100) % 100
+    return {(10, 3): 'gfx103X-all', (11, 0): 'gfx110X-all', (12, 0): 'gfx120X-all'}.get((major, minor))
+
+
+def detect_wheel_family(topology: Path = Path('/sys/class/kfd/kfd/topology/nodes')) -> str | None:
+    """GPU family from the kernel's KFD topology; needs no ROCm userspace. First supported GPU wins."""
+    try:
+        nodes = sorted(topology.iterdir(), key=lambda p: int(p.name) if p.name.isdigit() else 1 << 30)
+    except OSError:
+        return None
+    for node in nodes:
+        try:
+            for line in (node/'properties').read_text().splitlines():
+                key, _, value = line.partition(' ')
+                if key == 'gfx_target_version' and int(value) and wheel_family(int(value)):
+                    return wheel_family(int(value))
+        except (OSError, ValueError):
+            continue
+    return None
+
+
+def wheel_for(family: str | None) -> tuple[str, str]:
+    family = family if family in WHEELS else DEFAULT_WHEEL_FAMILY
+    return f'https://rocm.nightlies.amd.com/v2/{family}/{_WHEEL_NAME}', WHEELS[family]
 MAX_WHEEL_BYTES = 512 * 1024 * 1024
 MAX_EXPANDED_BYTES = 2 * 1024 * 1024 * 1024
 MIN_FREE_BYTES = 3 * 1024 * 1024 * 1024
@@ -249,13 +284,13 @@ def _run(argv, timeout):
     return proc
 
 
-def _download_wheel(destination: Path) -> str:
+def _download_wheel(destination: Path, url: str = WHEEL_URL, sha256: str = WHEEL_SHA256) -> str:
     """Bound bytes, elapsed time, TLS origin and digest before invoking pip."""
     start = time.monotonic()
     digest = hashlib.sha256()
     size = 0
     try:
-        with urllib.request.urlopen(WHEEL_URL, timeout=30) as response, destination.open('wb') as out:
+        with urllib.request.urlopen(url, timeout=30) as response, destination.open('wb') as out:
             final = urllib.parse.urlsplit(response.geturl())
             if final.scheme != 'https' or final.hostname != 'rocm.nightlies.amd.com':
                 raise RuntimeError('AMD wheel redirected outside the official HTTPS origin')
@@ -270,7 +305,7 @@ def _download_wheel(destination: Path) -> str:
                     raise RuntimeError('AMD wheel exceeded size/time download limit')
                 digest.update(block)
                 out.write(block)
-        if digest.hexdigest() != WHEEL_SHA256:
+        if digest.hexdigest() != sha256:
             raise RuntimeError('AMD wheel SHA256 mismatch; refusing installation')
         return digest.hexdigest()
     except (OSError, ValueError) as exc:
@@ -346,9 +381,10 @@ def _install_wheel(cache_root: Path) -> dict:
         except BlockingIOError as exc:
             raise RuntimeError('Another runtime installation is in progress') from exc
         with tempfile.TemporaryDirectory(prefix='wheel-', dir=cache_root) as temporary:
-            wheel = Path(temporary)/WHEEL_URL.rsplit('/', 1)[1]
+            url, sha256 = wheel_for(detect_wheel_family())
+            wheel = Path(temporary)/url.rsplit('/', 1)[1]
             _check_venv_support()
-            digest = _download_wheel(wheel)
+            digest = _download_wheel(wheel, url, sha256)
             metadata = _wheel_metadata(wheel)
             target.mkdir(exist_ok=True)
             if not marker.exists():
@@ -364,7 +400,7 @@ def _install_wheel(cache_root: Path) -> dict:
             actual = email.parser.Parser().parsestr(installed[0].read_text())
             if actual['Name'] != metadata['name'] or actual['Version'] != metadata['version']:
                 raise RuntimeError('Installed core metadata differs from verified wheel')
-            metadata.update(url=WHEEL_URL, sha256=digest, bytes=wheel.stat().st_size,
+            metadata.update(url=url, sha256=digest, bytes=wheel.stat().st_size,
                             installed_metadata_sha256=hashlib.sha256(installed[0].read_bytes()).hexdigest())
             _write_json(target/'wheel-provenance.json', metadata)
             return metadata
@@ -387,11 +423,14 @@ def _write_json(path: Path, data: dict):
             os.unlink(name)
 
 
-def ensure_runtime(cache_root: Path, supplied: Path | None = None, allow_install=False) -> dict:
+def ensure_runtime(cache_root: Path, supplied: Path | None = None, allow_install=False,
+                   visible_root: Path | None = None) -> dict:
     """Discover and validate, or install only with explicit consent. Raises RuntimeError.
 
     Successful state is recorded under cache_root, never in a game or global prefix.
     Explicit supplied paths are authoritative: failures do not silently fall back.
+    visible_root: the game only sees this tree (Flatpak Steam's home); runtimes
+    outside it would load on the host but not in the game, so they are skipped.
     """
     from .deploy import _safe
     cache_root = _safe(Path(cache_root).expanduser(), directory=True, missing=True)
@@ -418,6 +457,14 @@ def ensure_runtime(cache_root: Path, supplied: Path | None = None, allow_install
             raise RuntimeError(f'No HIP7 library found in supplied path: {supplied}')
     else:
         candidates = discover_runtimes(managed_root=managed)
+    if visible_root is not None:
+        visible = Path(visible_root).resolve()
+        hidden = [p for p in candidates if not p.is_relative_to(visible)]
+        candidates = [p for p in candidates if p.is_relative_to(visible)]
+        if supplied is not None and hidden:
+            raise RuntimeError(f'{supplied} is outside {visible}, which is all Flatpak Steam can see. '
+                               'Use the user-local AMD wheel (--install-rocm) or a runtime inside it.')
+        errors += [f'{p}: not visible to Flatpak Steam' for p in hidden]
     for candidate in candidates:
         try:
             return record(probe_runtime(candidate))

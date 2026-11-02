@@ -292,10 +292,41 @@ def _mount(path, loader=False):
     return value
 
 
-def _cache_path(digest):
-    base = Path(os.environ.get('XDG_DATA_HOME') or Path.home() / '.local/share')
+FLATPAK_STEAM_HOME = Path.home() / '.var/app/com.valvesoftware.Steam'
+
+
+def flatpak_steam_home(exe, home=None):
+    """Flatpak Steam's private home if `exe` belongs to Flatpak Steam, else None.
+
+    Flatpak Steam cannot see ~/.local/share or the host /usr, but it sees its own
+    ~/.var/app/com.valvesoftware.Steam at that same absolute path, in the sandbox
+    and inside the Steam Runtime container. Libraries on other drives count when
+    Flatpak Steam's libraryfolders.vdf lists them."""
+    home = Path(home or FLATPAK_STEAM_HOME)
+    if not home.is_dir():
+        return None
+    exe = Path(exe).absolute()
+    if exe.is_relative_to(home.absolute()):
+        return home
+    steam = home / '.local/share/Steam'
+    if steam.is_dir():
+        from .games import _libraries
+        if any(exe.is_relative_to(library) for library in _libraries(steam.resolve())):
+            return home
+    return None
+
+
+def data_base(exe=None):
+    """Root that holds dlssnr-linux data (ROCm venv, bridge cache) for this game."""
+    flatpak = flatpak_steam_home(exe) if exe is not None else None
+    base = flatpak / '.local/share' if flatpak else Path(os.environ.get('XDG_DATA_HOME') or Path.home() / '.local/share')
     if not base.is_absolute():
         raise RuntimeError('XDG_DATA_HOME must be absolute')
+    return base
+
+
+def _cache_path(digest, exe=None):
+    base = data_base(exe)
     result = base / 'dlssnr-linux/native' / digest / 'bridge.so'
     _mount(result, loader=True)
     _safe(result, missing=True)
@@ -324,6 +355,38 @@ def _cache(source, digest, cache):
             _atomic_copy(source, cache, digest, mode=0o600)
 
 
+PCI_DEVICES = Path('/sys/bus/pci/devices')
+
+
+def _gpu_selection(gpu, pci_root=PCI_DEVICES):
+    """Environment that keeps the game on the HIP GPU, keyed by PCI ID, never by name.
+
+    The game sees Proton's GPU name, which Wine takes from the PCI ID database
+    (e.g. "Radeon RX 6800/6800 XT / 6900 XT"); HIP reports "AMD Radeon RX 6800 XT"
+    and host Mesa "AMD Radeon RX 6800 XT (RADV NAVI21)". A DXVK/VKD3D name filter
+    built from the HIP name therefore matched nothing ("No adapters found").
+    With one display device there is nothing to choose; otherwise Mesa's device
+    select layer picks the HIP GPU by vendor:device."""
+    def read(path):
+        try:
+            return path.read_text().strip()
+        except OSError:
+            return ''
+    displays = [d for d in (sorted(pci_root.iterdir()) if pci_root.is_dir() else [])
+                if read(d / 'class').startswith('0x03')]
+    if len(displays) <= 1:
+        return {}
+    bus = str(gpu.get('pci_bus_id', '')).lower()
+    match = [d for d in displays if d.name.lower() == bus]
+    if len(match) != 1:
+        raise RuntimeError(f'Cannot map HIP GPU {gpu.get("name")!r} (PCI {bus or "unknown"}) '
+                           'to a display device; refusing an ambiguous multi-GPU setup')
+    vendor, device = read(match[0] / 'vendor'), read(match[0] / 'device')
+    if not (vendor.startswith('0x') and device.startswith('0x')):
+        raise RuntimeError(f'Cannot read PCI vendor/device for {bus}')
+    return {'MESA_VK_DEVICE_SELECT': f'{vendor[2:]}:{device[2:]}'}
+
+
 def _wrapper(exe, runtime, gpu, cache, bridge_hash=None):
     library = _mount(runtime['library'])
     if not Path(runtime['library']).is_absolute():
@@ -340,13 +403,12 @@ def _wrapper(exe, runtime, gpu, cache, bridge_hash=None):
     assignments = {
         'DLSSNR_HIP_LIBRARY': library,
         'DLSSNR_HIP_LOG': str(exe.parent / STORE / 'logs/hip.log'),
-        'DXVK_FILTER_DEVICE_NAME': gpu['name'],
-        'VKD3D_FILTER_DEVICE_NAME': gpu['name'],
         'VKD3D_NR_FLAG_HASH': '135ea1f88cbc832d',
         # vkd3d orders INFO below WARN; info hides device-removal reasons.
         'VKD3D_DEBUG': 'warn',
         'VKD3D_LOG_FILE': 'Z:' + str(exe.parent / STORE / 'logs/vkd3d.log'),
     }
+    assignments.update(_gpu_selection(gpu))
     lines = ['#!/bin/bash', 'set -e', '# Generated: no eval, no global Steam changes.']
     lines += ['if (( $# == 0 )); then',
               '  printf "%s\\n" "Usage: launch.sh RUNNER [ARGUMENTS...] (Steam: launch.sh %command%; other launchers: command prefix)." >&2',
@@ -781,7 +843,7 @@ def install_game(exe, package_root, runtime, gpu, proton, weights, *,
                 raise RuntimeError(f'Asset hash mismatch: {name}')
         weights = _safe(weights)
         weight_info = _weights(weights)
-        cache = _cache_path(hashes[BRIDGE])
+        cache = _cache_path(hashes[BRIDGE], exe)
         wrapper = _wrapper(exe, runtime, gpu, cache, hashes[BRIDGE])
         request = hashlib.sha256(json.dumps({'assets': {name: hashes[name] for name in DLLS + (BRIDGE,)},
                                              'weights': weight_info, 'wrapper': wrapper.decode(),

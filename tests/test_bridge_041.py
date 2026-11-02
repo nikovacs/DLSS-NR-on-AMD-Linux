@@ -14,8 +14,9 @@ class PriorityContractTests(unittest.TestCase):
         from dlssnr import legacy_converter
         self.assertEqual(upstream.HIP_IMPORTS - legacy_converter.HIP_IMPORTS,
             {'hipGetDevice','hipOccupancyMaxActiveBlocksPerMultiprocessor',
-             'hipDeviceGetStreamPriorityRange','hipStreamCreateWithPriority','hipStreamDestroy'})
-        self.assertEqual(len(upstream.HIP_IMPORTS),38)
+             'hipDeviceGetStreamPriorityRange','hipStreamCreateWithPriority','hipStreamDestroy',
+             'hipHostMalloc','hipHostGetDevicePointer'})  # 0.6.0 additions
+        self.assertEqual(len(upstream.HIP_IMPORTS),40)
 
     def test_previous_hip_table_rejected_by_package(self):
         manifest = json.loads((ROOT/'assets/manifest.json').read_text())
@@ -96,7 +97,7 @@ int main(void){
     g_hip_ok=1;real.p_hipDeviceGetStreamPriorityRange=range;
     real.p_hipStreamCreateWithPriority=create;real.p_hipStreamDestroy=destroy;
     int lo=0,hi=0;void *s=0;
-    assert(g_bridge.magic==0x344849504E524C44ULL);
+    assert(g_bridge.magic==0x354849504E524C44ULL);
     assert(g_bridge.p_hipDeviceGetStreamPriorityRange(&lo,&hi)==0 && lo==1 && hi==-1);
     assert(g_bridge.p_hipStreamCreateWithPriority(&s,1,-1)==0 && s==(void *)0x123456789ULL);
     assert(g_bridge.p_hipStreamDestroy(s)==0);

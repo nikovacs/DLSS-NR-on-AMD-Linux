@@ -13,7 +13,8 @@ import sys
 from . import assets, conversion, deploy, games, lmxxf, runtime, upstream
 
 PACKAGE_ROOT = Path(__file__).resolve().parents[1]
-TARGETS = frozenset(('gfx1100', 'gfx1101', 'gfx1102', 'gfx1200', 'gfx1201'))
+# Upstream 0.6.0 ships RDNA2 (gfx103x) register kernels in addition to RDNA3/RDNA4.
+TARGETS = frozenset(('gfx1030', 'gfx1031', 'gfx1032', 'gfx1100', 'gfx1101', 'gfx1102', 'gfx1200', 'gfx1201'))
 
 
 class InstallerCancelled(Exception):
@@ -233,7 +234,8 @@ def require(accepted, interactive, question, flag):
 
 
 def data_dir(args):
-    base = args.data_dir or Path(os.environ.get('XDG_DATA_HOME') or Path.home() / '.local/share') / 'dlssnr-linux'
+    # A game run by Flatpak Steam needs its runtime inside Flatpak Steam's home.
+    base = args.data_dir or deploy.data_base(getattr(args, '_game_exe', None)) / 'dlssnr-linux'
     base = Path(base).expanduser()
     if not base.is_absolute():
         raise RuntimeError('--data-dir / XDG_DATA_HOME must be absolute.')
@@ -361,6 +363,11 @@ def readonly_runtime(args):
         if supplied:
             candidates = [p for p in candidates if p.resolve().is_relative_to(supplied.resolve())]
     errors = []
+    if visible_root(args) is not None:
+        visible = visible_root(args).resolve()
+        errors += [f'{p}: outside {visible}, not visible to Flatpak Steam' for p in candidates
+                   if not p.resolve().is_relative_to(visible)]
+        candidates = [p for p in candidates if p.resolve().is_relative_to(visible)]
     for candidate in candidates:
         try:
             return runtime.probe_runtime(candidate)
@@ -372,9 +379,15 @@ def readonly_runtime(args):
                        'Use runtime --install-rocm or --hip-library.\n' + '\n'.join(errors))
 
 
+def visible_root(args):
+    exe = getattr(args, '_game_exe', None)
+    return deploy.flatpak_steam_home(exe) if exe is not None else None
+
+
 def ensure_runtime(args, interactive):
     try:
-        return runtime.ensure_runtime(data_dir(args), supplied=args.hip_library, allow_install=args.install_rocm)
+        return runtime.ensure_runtime(data_dir(args), supplied=args.hip_library, allow_install=args.install_rocm,
+                                      visible_root=visible_root(args))
     except runtime.DriverUnavailable:
         raise
     except RuntimeError as exc:
@@ -382,7 +395,7 @@ def ensure_runtime(args, interactive):
             raise
         print(str(exc))
         require(False, True, 'Download the pinned official AMD HIP7 wheel into your user directory (3 GiB free required)?', '--install-rocm')
-        return runtime.ensure_runtime(data_dir(args), allow_install=True)
+        return runtime.ensure_runtime(data_dir(args), allow_install=True, visible_root=visible_root(args))
 
 
 def emit(result, args):
@@ -555,6 +568,7 @@ def main(argv=None):
         if getattr(args, 'launcher', None) == 'other' and getattr(args, 'launch_options', None) is not None:
             raise RuntimeError('--launch-options is for Steam. Keep other-launcher arguments in that launcher.')
         exe = resolve_exe(args, interactive)
+        args._game_exe = exe
         if args.command == 'status':
             status = deploy.status_game(exe)
             emit(status, args)

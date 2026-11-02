@@ -61,11 +61,16 @@ does not require a writable system partition or change system packages.
 - **SteamOS:** run the installer in **Desktop Mode**, using a terminal. Keep the
   system read-only; do not run `steamos-readonly disable` for this mod. A working
   HIP 7 runtime, KFD access and a supported GPU are still required. Linux targets
-  remain `gfx1100`, `gfx1101`, `gfx1102`, `gfx1200`, and `gfx1201`; this does not
-  add Steam Deck/RDNA2 or handheld APU support.
-- **Steam Flatpak:** detecting its game library does not establish sandbox access
-  to the game, HIP runtime and `/dev/kfd`/render devices. Check those permissions;
-  `STEAM_COMPAT_MOUNTS` alone cannot override the outer Flatpak sandbox.
+  are `gfx1030`, `gfx1031`, `gfx1032` (RX 6000 desktop, upstream 0.6.0 RDNA2
+  kernels), `gfx1100`, `gfx1101`, `gfx1102`, `gfx1200` and `gfx1201`; this does
+  not add Steam Deck (`gfx1033`) or other handheld APU support.
+- **Steam Flatpak:** supported for games in Flatpak Steam's libraries. The
+  installer places the ROCm runtime and bridge under
+  `~/.var/app/com.valvesoftware.Steam/.local/share/dlssnr-linux`, which the
+  sandbox and the Steam Runtime container see at the same path; `~/.local/share`
+  and the host `/usr` are not visible there. The Flatpak needs device access
+  (`devices=all`, the Flathub default) for `/dev/kfd`. A user-local AMD wheel is
+  required there; a distribution ROCm under `/usr` cannot be used.
 
 CPU/installer tests do not establish gameplay compatibility on these systems.
 If an error mentions a missing device, unsupported architecture, read-only path,

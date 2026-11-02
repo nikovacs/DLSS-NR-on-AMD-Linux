@@ -86,8 +86,21 @@ static struct nr_resource_state *nr_find_token(uint64_t token) {
 }
 static struct nr_frame_state *nr_frame(struct nr_resource_state *r, uint32_t frame, int create) {
     struct nr_frame_state *s = &r->frames[frame % NR_ORDERED_WINDOW];
-    if (s->used && s->frame == frame)
+    if (s->used && s->frame == frame) {
+        /* Producer counter restart. Upstream 0.6.0 parks and reuses its shared
+         * flag buffer when the game re-creates its upscaler, then numbers frames
+         * from 1 again on the same token. Frame numbers otherwise only grow, so
+         * an already-consumed number on a fully idle resource (nothing published,
+         * pinned or job-owned) starts a fresh state; during activity it stays
+         * a rejected replay. */
+        if (create && s->consumed && !nr_resource_busy(r)) {
+            memset(s, 0, sizeof(*s));
+            s->used = 1;
+            s->frame = frame;
+            logmsg("ordered frame counter restart token=%llu frame=%u", (unsigned long long)r->token, frame);
+        }
         return s;
+    }
     if (!create || s->pins || s->job_owned || (s->used && !s->consumed && !s->error))
         return NULL;
     memset(s, 0, sizeof(*s));
@@ -471,7 +484,10 @@ static int nr_route_job_launch(const void *f, void *stream) {
         return stream == nr_job.stream ? 0 : nr_job_error(1);
     if (nr_job.work_bound)
         return stream == nr_job.work_stream ? 0 : nr_job_error(1);
-    if (f != g_k_import)
+    /* The first work-queue kernel of a job reads game inputs after the
+     * producer handoff: k_import, or since upstream 0.6.0 k_expo_resolve
+     * (FreshExposure reads the frame's exposure texture before k_import). */
+    if (f != g_k_import && !(g_k_expo && f == g_k_expo))
         return stream == nr_job.stream ? 0 : nr_job_error(1);
     /* Only the reviewed null-marker -> explicit-work transition is supported.
      * Drain the marker queue before launching work on another queue, so any

@@ -1,5 +1,34 @@
 # Release notes
 
+## Unreleased — upstream 0.6.0, RDNA2, Flatpak Steam
+
+- Stage upstream 0.6.0. Its synchronization shaders are byte-identical to 0.5.0
+  at new offsets, so the vkd3d patch and flag hash are unchanged.
+- Bridge ABI 5: forward `hipHostMalloc` / `hipHostGetDevicePointer` (0.6.0 maps a
+  host status flag at network setup).
+- Ordered handoff: accept 0.6.0's `k_expo_resolve` (FreshExposure) as the first
+  work-queue kernel, and treat a repeated frame number on an idle resource as a
+  producer counter restart (0.6.0 reuses pooled flag buffers after the game
+  re-creates its upscaler).
+- Load ROCm on a plain thread: on a Wine thread inside the Flatpak Steam
+  container the loader hung or rejected valid ELF files.
+- Preload `libamd_comgr.so.3` beside the selected HIP library: distribution HIP
+  loads it by name at device initialization, which fails inside the container.
+- Select the game's GPU by PCI vendor:device (`MESA_VK_DEVICE_SELECT`) on
+  multi-GPU systems and not at all on single-GPU systems. The previous
+  `DXVK/VKD3D_FILTER_DEVICE_NAME` used the HIP name, which differs from the name
+  Proton reports (Wine uses the PCI ID database, e.g. "Radeon RX 6800/6800 XT /
+  6900 XT"), so DXVK found no adapter and games failed to start DirectX 12.
+- Allow `gfx1030`/`gfx1031`/`gfx1032` and choose the AMD core wheel per GPU family
+  (`gfx103X`, `gfx110X`, `gfx120X`, same pinned ROCm version) from the kernel's
+  KFD topology.
+- Flatpak Steam: keep runtime and bridge inside Flatpak Steam's home.
+- Checked: Hogwarts Legacy (FSR 3) on RX 6800 XT / gfx1030, Flatpak Steam,
+  Proton Experimental, Fast arithmetic: neural rendering runs, about 121 ms of
+  network time per frame at 3414x961 render resolution (5120x1440, FSR Quality).
+  RDNA2 has no matrix instructions; expect low frame rates. Other games, RDNA3/4
+  regression and gfx1031/gfx1032 are not yet re-checked with this build.
+
 ## 0.5.0 — Linux / Proton
 
 - Stage upstream 0.5.0 using pinned bytes, checksum and embedded payload bounds.

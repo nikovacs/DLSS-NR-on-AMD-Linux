@@ -19,7 +19,7 @@
 #include <errno.h>
 
 /* Keep stubs in g_bridge forever. Real HIP lives in `real`. */
-const char dlssnr_hip_abi_marker[] = "DLSSNR_HIP_ABI_V4";
+const char dlssnr_hip_abi_marker[] = "DLSSNR_HIP_ABI_V5";
 static DlssnrHipBridge g_bridge;
 static DlssnrHipBridge real;
 static void *g_hip;
@@ -32,6 +32,7 @@ static void *g_flag_wait;
 static void *g_flag_set;
 static void *g_k_export;
 static void *g_k_import;
+static void *g_k_expo;  /* 0.6.0 k_expo_resolve: may open the work stream before k_import */
 static void *g_done_event;
 static int (*p_hipStreamSynchronize)(void *stream);
 static int (*p_hipImportExternalSemaphore)(void **out, const void *desc);
@@ -286,9 +287,33 @@ static void hip_preload_needed(const char *hip_path) {
     if (!hip_path || hip_path[0] != '/' || strlen(hip_path) >= 768)
         return;
     hip_preload_deps(hip_path, hip_path, seen, &ns);
+
+    /* Libraries HIP dlopen()s by soname at device init rather than declaring
+     * them DT_NEEDED. Inside the Steam Runtime container a host ROCm directory
+     * (e.g. /run/host/usr/lib64) is not on the search path, so HIP fails with
+     * "Failed to load COMGR library" -> hipErrorNoDevice. Loading them
+     * RTLD_GLOBAL from the HIP origin first makes HIP's own dlopen resolve to
+     * the already-loaded object. */
+    static const char *const runtime_sonames[] = {"libamd_comgr.so.3", NULL};
+    for (int i = 0; runtime_sonames[i]; i++) {
+        char found[768];
+        void *h = dlopen(runtime_sonames[i], RTLD_NOW | RTLD_GLOBAL | RTLD_NOLOAD);
+        if (h) {
+            dlclose(h);
+            continue;
+        }
+        if (hip_find_soname(hip_path, runtime_sonames[i], found, sizeof(found)))
+            continue; /* Not beside HIP: leave it to HIP's own search. */
+        hip_preload_deps(hip_path, found, seen, &ns);
+        h = dlopen(found, RTLD_NOW | RTLD_GLOBAL);
+        if (h)
+            logmsg("preloaded HIP runtime dep %s", found);
+        else
+            logmsg("dlopen HIP runtime dep %s failed: %s", found, dlerror());
+    }
 }
 
-static int ensure_hip(void) {
+static int ensure_hip_impl(void) {
     if (g_hip_ok)
         return 0;
     if (g_hip)
@@ -372,10 +397,46 @@ static int ensure_hip(void) {
     if (!real.p_hipDeviceGetStreamPriorityRange || !real.p_hipStreamCreateWithPriority
             || !real.p_hipStreamDestroy)
         return -1;
+    real.p_hipHostMalloc = must_dlsym("hipHostMalloc");
+    real.p_hipHostGetDevicePointer = must_dlsym("hipHostGetDevicePointer");
+    if (!real.p_hipHostMalloc || !real.p_hipHostGetDevicePointer)
+        return -1;
     g_hip_ok = 1;
     if (real.p_hipEventCreate)
         real.p_hipEventCreate(&g_done_event);
     return 0;
+}
+
+/* The first HIP call arrives on a Wine-managed Windows thread. Under the
+ * Flatpak Steam + pressure-vessel container, loading the ROCm libraries on
+ * that thread fails: glibc's loader either blocks forever (in a
+ * dlopen(soname, RTLD_NOLOAD) probe) or rejects valid ELF files with
+ * "invalid ELF header". The identical load succeeds on an ordinary Linux
+ * thread, so do the one-time load on a short-lived pthread and join it. */
+static void *ensure_hip_thread(void *arg) {
+    *(int *)arg = ensure_hip_impl();
+    return NULL;
+}
+static int ensure_hip(void) {
+    static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
+    pthread_t t;
+    int rc;
+    if (g_hip_ok)
+        return 0;
+    pthread_mutex_lock(&mu);
+    if (g_hip_ok) {
+        rc = 0;
+    } else if (g_hip) {
+        rc = -1;  /* An earlier attempt loaded HIP but failed validation. */
+    } else {
+        rc = -1;
+        if (pthread_create(&t, NULL, ensure_hip_thread, &rc) == 0)
+            pthread_join(t, NULL);
+        else
+            rc = ensure_hip_impl();
+    }
+    pthread_mutex_unlock(&mu);
+    return rc;
 }
 
 /* MSVC/GCC layout of hipExternalMemoryHandleDesc (104 bytes). */
@@ -646,6 +707,9 @@ static void stub_reg_fn(void **mo, const void *hf, char *df, const char *dn, uns
         } else if (strstr(dn, "k_import")) {
             g_k_import = (void *)hf;
             logmsg("kernel %s hf=%p", dn, hf);
+        } else if (strstr(dn, "k_expo_resolve")) {
+            g_k_expo = (void *)hf;
+            logmsg("kernel %s hf=%p", dn, hf);
         }
     }
 }
@@ -861,6 +925,22 @@ static int stub_streamdestroy(void *stream) {
     logmsg("stream destroy err=%d", result);
     return result;
 }
+/* Upstream 0.6.0 allocates a 4-byte mapped host flag at network setup
+ * (hipHostMalloc(..., hipHostMallocMapped) + hipHostGetDevicePointer).
+ * Host pointers are process-wide, so plain forwarding is correct. */
+static int stub_host_malloc(void **ptr, u64 size, unsigned int flags) {
+    if (ensure_hip() || !real.p_hipHostMalloc) return 3;
+    int result = real.p_hipHostMalloc(ptr, size, flags);
+    logmsg("hipHostMalloc size=%llu flags=%u -> %d ptr=%p", (unsigned long long)size, flags,
+           result, ptr ? *ptr : NULL);
+    return result;
+}
+static int stub_host_devptr(void **dev, void *host, unsigned int flags) {
+    if (ensure_hip() || !real.p_hipHostGetDevicePointer) return 3;
+    int result = real.p_hipHostGetDevicePointer(dev, host, flags);
+    logmsg("hipHostGetDevicePointer host=%p -> %d dev=%p", host, result, dev ? *dev : NULL);
+    return result;
+}
 static int stub_streamsync(void *stream) {
     if (ensure_hip() || !real.p_hipStreamSynchronize) return 3;
     int result = real.p_hipStreamSynchronize(stream);
@@ -962,6 +1042,8 @@ __attribute__((constructor)) static void dlssnr_hip_init(void) {
     g_bridge.p_hipDeviceGetStreamPriorityRange = stub_priority_range;
     g_bridge.p_hipStreamCreateWithPriority = stub_streamcreate_priority;
     g_bridge.p_hipStreamDestroy = stub_streamdestroy;
+    g_bridge.p_hipHostMalloc = stub_host_malloc;
+    g_bridge.p_hipHostGetDevicePointer = stub_host_devptr;
     g_bridge.p_hipStreamSynchronize = stub_streamsync;
     g_bridge.p_hipEventRecord = stub_evrec;
     g_bridge.p_hipEventSynchronize = stub_evsync;
