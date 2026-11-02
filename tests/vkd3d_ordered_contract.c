@@ -275,6 +275,29 @@ static void invalid_sequences(void) {
     /* Closed/completed sequences cannot license an unpaired later wait. */
     record(&f,1,1,256); assert(f.device.removed); destroy(&f);
 }
+/* Upstream 0.8.0 flag shaders: mode 3 (release marker) runs unchanged, and the
+ * finalizer may carry a 0..3 status slot. Neither is accepted from 0.6.0's shader. */
+static void upstream_080_sequences(void) {
+    struct fixture f;
+    init(&f); f.state.compute.code.meta.hash=UINT64_C(0xaa3284fa572c77af);
+    assert(!record(&f,3,7,0) && !f.device.removed);              /* release before any frame */
+    assert(!record(&f,0,1,0)); assert(record(&f,1,1,256));
+    assert(!record(&f,3,1,0) && !f.device.removed);              /* release inside a frame */
+    assert(!record(&f,2,1,2) && !f.device.removed);              /* finalizer, status slot 2 */
+    assert(!f.list.cmd.nr_armed_token && !f.list.cmd.nr_wait_token);
+    destroy(&f);
+    init(&f); f.state.compute.code.meta.hash=UINT64_C(0xaa3284fa572c77af);
+    assert(!record(&f,0,1,0)); assert(record(&f,1,1,256));
+    record(&f,2,1,4); assert(f.device.removed==DXGI_ERROR_INVALID_CALL);   /* no slot 4 */
+    destroy(&f);
+    init(&f);                                                     /* 0.6.0 shader */
+    assert(!record(&f,0,1,0)); assert(record(&f,1,1,256));
+    record(&f,2,1,2); assert(f.device.removed==DXGI_ERROR_INVALID_CALL);   /* 0.6.0 has no slots */
+    destroy(&f);
+    init(&f); f.state.graphics.code[1].meta.hash=UINT64_C(0x997c1dfffffe3ea9);  /* 0.8.0 pixel wait */
+    assert(!record(&f,0,1,0)); assert(draw_wait(&f,1,256) && !f.device.removed);
+    destroy(&f);
+}
 int main(int argc, char **argv) {
     setenv("VKD3D_NR_FLAG_HASH","135ea1f88cbc832d",1);
     api.lookup_va=lookup; api.snapshot=snapshot; api.claim_queue=claim;
@@ -283,6 +306,7 @@ int main(int argc, char **argv) {
     if (golden_sequence(1) || golden_sequence(4000)) return 1;
     invalid_sequences();
     graphics_sequences();
+    upstream_080_sequences();
     puts("vkd3d ordered protocol contracts passed (CPU mocks; no GPU validation)");
     return 0;
 }

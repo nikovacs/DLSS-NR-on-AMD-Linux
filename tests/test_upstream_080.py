@@ -56,5 +56,32 @@ int main(void) {
             subprocess.run([str(d/'t')], check=True, capture_output=True, timeout=15)
 
 
+VKD3D_SOURCE = ROOT/'build/vkd3d-source/libs/vkd3d'
+
+
+class Vkd3dOrderedContract(unittest.TestCase):
+    """CPU contract for the patched nr_ordered_commands.h (needs the patched source tree:
+    python3 sources/fetch_vkd3d.py build/vkd3d-source)."""
+    @unittest.skipUnless(shutil.which('gcc') and (VKD3D_SOURCE/'nr_ordered_commands.h').is_file(),
+                         'patched vkd3d source tree required')
+    def test_contract(self):
+        with tempfile.TemporaryDirectory() as d:
+            exe = Path(d)/'vkc'
+            subprocess.run(['gcc', '-std=gnu11', '-O1', '-g', '-fsanitize=address,undefined', '-I', str(VKD3D_SOURCE),
+                            str(ROOT/'tests/vkd3d_ordered_contract.c'), '-o', str(exe)],
+                           check=True, capture_output=True, timeout=60)
+            subprocess.run([str(exe)], check=True, capture_output=True, timeout=30,
+                           env={'ASAN_OPTIONS': 'detect_leaks=0', 'PATH': '/usr/bin:/bin'})
+
+    def test_patch_matches_source_tree(self):
+        if not (VKD3D_SOURCE/'nr_ordered_commands.h').is_file():
+            self.skipTest('patched vkd3d source tree required')
+        patch = (ROOT/'sources/vkd3d-proton-ordered.patch').read_text()
+        header = (VKD3D_SOURCE/'nr_ordered_commands.h').read_text()
+        added = [line[1:] for line in patch.split('diff --git a/libs/vkd3d/nr_ordered_commands.h')[1].split('diff --git')[0].splitlines()
+                 if line.startswith('+') and not line.startswith('+++')]
+        self.assertEqual('\n'.join(added).strip(), header.strip())
+
+
 if __name__ == '__main__':
     unittest.main()

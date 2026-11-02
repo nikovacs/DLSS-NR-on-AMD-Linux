@@ -19,7 +19,7 @@
     "repository": "https://github.com/HansKristian-Work/vkd3d-proton.git",
     "commit": "35bdee1435c94f8c3548725fcb046595b263bd7e",
     "patch": "sources/vkd3d-proton-ordered.patch",
-    "patch_sha256": "89cb6443178ce85366c5dbb8e7fbe6e7c58abadab6e53d291661e309822d540d",
+    "patch_sha256": "841b67408468174d1112109afcc2ab8aa1f745156fd6614c4b6e02b01f55a7a2",
     "submodules": "sources/vkd3d-submodules.json"
   },
   "toolchain": {
@@ -87,7 +87,7 @@
     "sources/fetch_vkd3d.py": "e4dd8bf7a8712e2a6fd08853093be8bf7a83dfb6417b96bce4791cba27819c7a",
     "sources/cross-win64.ini": "5a1c6f19cea810e48c37fe5dc6b82850a166ac79877914c7cb845ce22730aa94",
     "sources/vkd3d-submodules.json": "bf2e242a72f71c4562e894af8cf9db2be2302a498e2d542bf0b433181a2f7325",
-    "sources/vkd3d-proton-ordered.patch": "89cb6443178ce85366c5dbb8e7fbe6e7c58abadab6e53d291661e309822d540d",
+    "sources/vkd3d-proton-ordered.patch": "841b67408468174d1112109afcc2ab8aa1f745156fd6614c4b6e02b01f55a7a2",
     "sources/trampoline/amdhip64_7_pe.c": "6474192ed5738a651c8b55f26fb7f3e4f8856529de6fb062ceef9d1cc461f473",
     "sources/trampoline/hip_bridge.h": "092efd67ac44528933c81020d8c2b59ff321319ef44dd73f868b96b20cea8c91",
     "sources/trampoline/kernel32.def": "d08bc40e9251068e0519ae9d664253804133ff58c0f75975609a16d5bbb0ea9a",
