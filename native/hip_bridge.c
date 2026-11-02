@@ -738,6 +738,10 @@ static void stub_reg_fn(void **mo, const void *hf, char *df, const char *dn, uns
         return;
     real.p___hipRegisterFunction(mo, hf, df, dn, tl, tid, bid, bd, gd, ws);
     if (dn && hf) {
+        /* Diagnostics: name every kernel, so an "ordered launch refused ... kernel=%p"
+         * line can be read against the build (new upstream kernels show up here). */
+        const char *diag = getenv("DLSSNR_DIAGNOSTICS");
+        if (diag && !strcmp(diag, "1")) logmsg("register kernel hf=%p %s", hf, dn);
 #ifdef DLSSNR_ACTIVE_C32
         c32_register(hf,dn);
 #else
