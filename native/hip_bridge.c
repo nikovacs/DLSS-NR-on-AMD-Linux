@@ -97,7 +97,10 @@ void hip_log(const char *fmt, ...) {
     va_list ap;
     if (!g_log) {
         const char *path = getenv("DLSSNR_HIP_LOG");
-        g_log = fopen(path && path[0] ? path : "/tmp/dlssnr-hip.log", "a");
+        /* No configured log: stay silent. */
+        if (!path || !path[0])
+            return;
+        g_log = fopen(path, "a");
         if (g_log)
             setvbuf(g_log, NULL, _IOLBF, 0);
     }
@@ -1033,7 +1036,34 @@ static int stub_desext(void *m) {
     return real.p_hipDestroyExternalMemory(m);
 }
 
+/* bridge.conf beside this library: KEY=VALUE lines for the DLSSNR_* settings the
+ * launch script would otherwise export (needed when no launch script runs, e.g. the
+ * library is loaded by the game-folder trampoline itself). The environment wins. */
+static void load_bridge_conf(void) {
+    static const char *const keys[] = {"DLSSNR_HIP_LIBRARY", "DLSSNR_HIP_LOG", "DLSSNR_DIAGNOSTICS", NULL};
+    Dl_info info;
+    char path[4096], line[4096];
+    if (!dladdr((void *)load_bridge_conf, &info) || !info.dli_fname) return;
+    const char *slash = strrchr(info.dli_fname, '/');
+    if (!slash || (size_t)(slash - info.dli_fname) + sizeof("/bridge.conf") > sizeof(path)) return;
+    memcpy(path, info.dli_fname, (size_t)(slash - info.dli_fname));
+    strcpy(path + (slash - info.dli_fname), "/bridge.conf");
+    FILE *f = fopen(path, "r");
+    if (!f) return;
+    while (fgets(line, sizeof(line), f)) {
+        line[strcspn(line, "\r\n")] = 0;
+        char *eq = strchr(line, '=');
+        if (line[0] == '#' || !eq) continue;
+        *eq = 0;
+        for (unsigned i = 0; keys[i]; ++i)
+            if (!strcmp(line, keys[i])) setenv(line, eq + 1, 0);
+    }
+    fclose(f);
+}
+
 __attribute__((constructor)) static void dlssnr_hip_init(void) {
+    int quiet_load = !getenv("DLSSNR_HIP_LOG"); /* launch-script mode logs its load */
+    load_bridge_conf();
     memset(&g_bridge, 0, sizeof(g_bridge));
     memset(&real, 0, sizeof(real));
     g_bridge.magic = DLSSNR_HIP_MAGIC;
@@ -1083,7 +1113,8 @@ __attribute__((constructor)) static void dlssnr_hip_init(void) {
     setenv(DLSSNR_HIP_ENV, buf, 1);
     snprintf(buf, sizeof(buf), "%p", (void *)&nr_api);
     setenv(NR_ORDERED_ENV, buf, 1);
-    logmsg("preload lazy table=%s (HIP not opened yet)", buf);
+    if (!quiet_load)
+        logmsg("preload lazy table=%s (HIP not opened yet)", buf);
 #ifdef DLSSNR_ACTIVE_C32
     c32_startup();
 #endif

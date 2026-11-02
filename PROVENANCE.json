@@ -76,7 +76,7 @@
     "dlssnr/games.py": "b7373b7d6ab5210aa989acdec42f99def5e3060edaaffccb5da4016272fd9890",
     "dlssnr/runtime.py": "6691b83cd1b8c5c2f70890dba39a30a59e9a5c400d01b118ed4f5ae8b4edf706",
     "dlssnr/upstream.py": "43b7206460882b39c9fc617cae08b67245ab90d1fa801206e01216a5b6d00175",
-    "native/hip_bridge.c": "ed9cf0dcf21e6772fb319910bd01c1df70385fe7b937e236cb8beb4b7c7e8662",
+    "native/hip_bridge.c": "abb8f635092bd3128a12c051e35d03815b775424536968437c189d601dbeaf67",
     "native/hip_bridge.h": "94057447649b8d0bac22dc77d62713395fb20bd86e675e9354d177223caa3ce9",
     "native/nr_ordered.c": "1610a3c72ed731cf519902044d4eb61be24e3f43a07f06628f94eda7811cd535",
     "native/nr_ordered.h": "75338a3eb407eaf06f7f3d81095e8a0abec0619e92dd33a1c5ebcc191fcdd1f0",
