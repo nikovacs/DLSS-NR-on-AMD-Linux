@@ -19,7 +19,7 @@
 #include <errno.h>
 
 /* Keep stubs in g_bridge forever. Real HIP lives in `real`. */
-const char dlssnr_hip_abi_marker[] = "DLSSNR_HIP_ABI_V5";
+const char dlssnr_hip_abi_marker[] = "DLSSNR_HIP_ABI_V6";
 static DlssnrHipBridge g_bridge;
 static DlssnrHipBridge real;
 static void *g_hip;
@@ -434,6 +434,20 @@ static int ensure_hip_impl(void) {
     real.p_hipHostMalloc = must_dlsym("hipHostMalloc");
     real.p_hipHostGetDevicePointer = must_dlsym("hipHostGetDevicePointer");
     if (!real.p_hipHostMalloc || !real.p_hipHostGetDevicePointer)
+        return -1;
+    /* ABI 6 (upstream 0.8.0). */
+    real.p_hipCreateTextureObject = must_dlsym("hipCreateTextureObject");
+    real.p_hipDestroyTextureObject = must_dlsym("hipDestroyTextureObject");
+    real.p_hipEventDestroy = must_dlsym("hipEventDestroy");
+    real.p_hipHostFree = must_dlsym("hipHostFree");
+    real.p_hipMallocPitch = must_dlsym("hipMallocPitch");
+    real.p_hipMemcpy2D = must_dlsym("hipMemcpy2D");
+    real.p_hipMemcpyFromSymbol = must_dlsym("hipMemcpyFromSymbol");
+    real.p_hipMemset2D = must_dlsym("hipMemset2D");
+    real.p_hipMemset2DAsync = must_dlsym("hipMemset2DAsync");
+    real.p_hipMemsetD16Async = must_dlsym("hipMemsetD16Async");
+    real.p_hipStreamCreate = must_dlsym("hipStreamCreate");
+    if (!real.p_hipCreateTextureObject || !real.p_hipDestroyTextureObject || !real.p_hipEventDestroy || !real.p_hipHostFree || !real.p_hipMallocPitch || !real.p_hipMemcpy2D || !real.p_hipMemcpyFromSymbol || !real.p_hipMemset2D || !real.p_hipMemset2DAsync || !real.p_hipMemsetD16Async || !real.p_hipStreamCreate)
         return -1;
     g_hip_ok = 1;
     if (real.p_hipEventCreate)
@@ -967,6 +981,95 @@ static int stub_host_devptr(void **dev, void *host, unsigned int flags) {
     logmsg("hipHostGetDevicePointer host=%p -> %d dev=%p", host, result, dev ? *dev : NULL);
     return result;
 }
+/* ABI 6: functions upstream 0.8.0 (the NeuralHub host) resolves by name. Plain
+ * forwarding: their descriptor structs (hipResourceDesc, hipTextureDesc, ...) use
+ * only int/enum, float, pointer and size_t fields, so Win64 and Linux layouts match.
+ * The first calls of each are logged so a run shows which ones a build really uses. */
+static void abi6_log(const char *name, unsigned *count, int result) {
+    if (__atomic_fetch_add(count, 1, __ATOMIC_RELAXED) < 4) logmsg("%s -> %d", name, result);
+}
+static int stub_hipCreateTextureObject(void **tex, const void *res_desc, const void *tex_desc, const void *view_desc) {
+    static unsigned calls;
+    if (ensure_hip() || !real.p_hipCreateTextureObject) return 3;
+    int result = real.p_hipCreateTextureObject(tex, res_desc, tex_desc, view_desc);
+    abi6_log("hipCreateTextureObject", &calls, result);
+    return result;
+}
+static int stub_hipDestroyTextureObject(void *tex) {
+    static unsigned calls;
+    if (ensure_hip() || !real.p_hipDestroyTextureObject) return 3;
+    int result = real.p_hipDestroyTextureObject(tex);
+    abi6_log("hipDestroyTextureObject", &calls, result);
+    return result;
+}
+static int stub_hipEventDestroy(void *event) {
+    static unsigned calls;
+    if (ensure_hip() || !real.p_hipEventDestroy) return 3;
+    int result = real.p_hipEventDestroy(event);
+    abi6_log("hipEventDestroy", &calls, result);
+    return result;
+}
+static int stub_hipHostFree(void *ptr) {
+    static unsigned calls;
+    if (ensure_hip() || !real.p_hipHostFree) return 3;
+    int result = real.p_hipHostFree(ptr);
+    abi6_log("hipHostFree", &calls, result);
+    return result;
+}
+static int stub_hipMallocPitch(void **ptr, u64 *pitch, u64 width, u64 height) {
+    static unsigned calls;
+    if (ensure_hip() || !real.p_hipMallocPitch) return 3;
+    int result = real.p_hipMallocPitch(ptr, pitch, width, height);
+    abi6_log("hipMallocPitch", &calls, result);
+    return result;
+}
+static int stub_hipMemcpy2D(void *dst, u64 dpitch, const void *src, u64 spitch, u64 width, u64 height, int kind) {
+    static unsigned calls;
+    if (ensure_hip() || !real.p_hipMemcpy2D) return 3;
+    if (kind != 2) { int e = c32_invalidate(dst, (size_t)(dpitch * height), 0); if (e) return e; }
+    int result = real.p_hipMemcpy2D(dst, dpitch, src, spitch, width, height, kind);
+    abi6_log("hipMemcpy2D", &calls, result);
+    return result;
+}
+static int stub_hipMemcpyFromSymbol(void *dst, const void *symbol, u64 bytes, u64 offset, int kind) {
+    static unsigned calls;
+    if (ensure_hip() || !real.p_hipMemcpyFromSymbol) return 3;
+    if (kind != 2) { int e = c32_invalidate(dst, (size_t)(bytes), 0); if (e) return e; }
+    int result = real.p_hipMemcpyFromSymbol(dst, symbol, bytes, offset, kind);
+    abi6_log("hipMemcpyFromSymbol", &calls, result);
+    return result;
+}
+static int stub_hipMemset2D(void *dst, u64 pitch, int value, u64 width, u64 height) {
+    static unsigned calls;
+    if (ensure_hip() || !real.p_hipMemset2D) return 3;
+    if (1) { int e = c32_invalidate(dst, (size_t)(pitch * height), 0); if (e) return e; }
+    int result = real.p_hipMemset2D(dst, pitch, value, width, height);
+    abi6_log("hipMemset2D", &calls, result);
+    return result;
+}
+static int stub_hipMemset2DAsync(void *dst, u64 pitch, int value, u64 width, u64 height, void *stream) {
+    static unsigned calls;
+    if (ensure_hip() || !real.p_hipMemset2DAsync) return 3;
+    if (1) { int e = c32_invalidate(dst, (size_t)(pitch * height), 0); if (e) return e; }
+    int result = real.p_hipMemset2DAsync(dst, pitch, value, width, height, stream);
+    abi6_log("hipMemset2DAsync", &calls, result);
+    return result;
+}
+static int stub_hipMemsetD16Async(void *dst, unsigned short value, u64 count, void *stream) {
+    static unsigned calls;
+    if (ensure_hip() || !real.p_hipMemsetD16Async) return 3;
+    if (1) { int e = c32_invalidate(dst, (size_t)(count * 2), 0); if (e) return e; }
+    int result = real.p_hipMemsetD16Async(dst, value, count, stream);
+    abi6_log("hipMemsetD16Async", &calls, result);
+    return result;
+}
+static int stub_hipStreamCreate(void **stream) {
+    static unsigned calls;
+    if (ensure_hip() || !real.p_hipStreamCreate) return 3;
+    int result = real.p_hipStreamCreate(stream);
+    abi6_log("hipStreamCreate", &calls, result);
+    return result;
+}
 static int stub_streamsync(void *stream) {
     if (ensure_hip() || !real.p_hipStreamSynchronize) return 3;
     int result = real.p_hipStreamSynchronize(stream);
@@ -1070,6 +1173,17 @@ __attribute__((constructor)) static void dlssnr_hip_init(void) {
     g_bridge.p_hipStreamDestroy = stub_streamdestroy;
     g_bridge.p_hipHostMalloc = stub_host_malloc;
     g_bridge.p_hipHostGetDevicePointer = stub_host_devptr;
+    g_bridge.p_hipCreateTextureObject = stub_hipCreateTextureObject;
+    g_bridge.p_hipDestroyTextureObject = stub_hipDestroyTextureObject;
+    g_bridge.p_hipEventDestroy = stub_hipEventDestroy;
+    g_bridge.p_hipHostFree = stub_hipHostFree;
+    g_bridge.p_hipMallocPitch = stub_hipMallocPitch;
+    g_bridge.p_hipMemcpy2D = stub_hipMemcpy2D;
+    g_bridge.p_hipMemcpyFromSymbol = stub_hipMemcpyFromSymbol;
+    g_bridge.p_hipMemset2D = stub_hipMemset2D;
+    g_bridge.p_hipMemset2DAsync = stub_hipMemset2DAsync;
+    g_bridge.p_hipMemsetD16Async = stub_hipMemsetD16Async;
+    g_bridge.p_hipStreamCreate = stub_hipStreamCreate;
     g_bridge.p_hipStreamSynchronize = stub_streamsync;
     g_bridge.p_hipEventRecord = stub_evrec;
     g_bridge.p_hipEventSynchronize = stub_evsync;

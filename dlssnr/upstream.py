@@ -128,3 +128,23 @@ def prepared_package(package_root, setup=None):
         (assets / 'manifest.json').write_text(json.dumps(manifest, indent=2) + '\n')
         (prepared / 'staging.json').write_text(json.dumps(report, indent=2) + '\n')
         yield prepared
+
+
+# Upstream 0.8.0 (NeuralHub host, neuralhub_host.dll) links no HIP import: it loads
+# amdhip64_7.dll beside the game at first use and resolves these by name. The
+# bridge trampoline must export every one (ABI 6 added the last eleven).
+UPSTREAM_080_HIP_RESOLVED = frozenset((
+    '__hipRegisterFatBinary',
+    '__hipRegisterFunction', '__hipRegisterVar', '__hipUnregisterFatBinary',
+    'hipCreateTextureObject', 'hipDestroyExternalMemory', 'hipDestroyTextureObject',
+    'hipDeviceGetStreamPriorityRange', 'hipDeviceSynchronize', 'hipDriverGetVersion',
+    'hipEventCreate', 'hipEventCreateWithFlags', 'hipEventDestroy', 'hipEventElapsedTime',
+    'hipEventQuery', 'hipEventRecord', 'hipEventSynchronize', 'hipExternalMemoryGetMappedBuffer',
+    'hipFree', 'hipGetDevice', 'hipGetDeviceCount', 'hipGetDevicePropertiesR0600',
+    'hipGetErrorString', 'hipGetLastError', 'hipHostFree', 'hipHostGetDevicePointer',
+    'hipHostMalloc', 'hipImportExternalMemory', 'hipLaunchKernel', 'hipMalloc', 'hipMallocPitch',
+    'hipMemcpy', 'hipMemcpy2D', 'hipMemcpyAsync', 'hipMemcpyFromSymbol', 'hipMemcpyToSymbol',
+    'hipMemset', 'hipMemset2D', 'hipMemset2DAsync', 'hipMemsetAsync', 'hipMemsetD16Async',
+    'hipOccupancyMaxActiveBlocksPerMultiprocessor', 'hipRuntimeGetVersion', 'hipSetDevice',
+    'hipStreamCreate', 'hipStreamCreateWithFlags', 'hipStreamCreateWithPriority',
+    'hipStreamDestroy', 'hipStreamSynchronize'))

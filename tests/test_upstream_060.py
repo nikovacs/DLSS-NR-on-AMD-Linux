@@ -19,7 +19,7 @@ class Release060(unittest.TestCase):
         self.assertEqual(upstream.SETUP_BYTES, 59841536)
         self.assertEqual(upstream.PAYLOAD_BYTES, 56677888)
         self.assertEqual(manifest['external_files']['dlssnr_on_amd_setup.exe'], upstream.SETUP_SHA256)
-        self.assertEqual(manifest['hip_bridge_abi'], 5)
+        self.assertEqual(manifest['hip_bridge_abi'], 6)
 
     def test_sync_shaders_unchanged_only_relocated(self):
         # 0.6.0 carries the 0.5.0 shaders byte-for-byte, so vkd3d's flag hash is unchanged.

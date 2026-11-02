@@ -2,7 +2,7 @@
 #ifndef DLSSNR_HIP_BRIDGE_H
 #define DLSSNR_HIP_BRIDGE_H
 
-#define DLSSNR_HIP_MAGIC 0x354849504E524C44ULL /* "DLNRHIP5"; incompatible tables are rejected */
+#define DLSSNR_HIP_MAGIC 0x364849504E524C44ULL /* "DLNRHIP6"; incompatible tables are rejected */
 #define DLSSNR_HIP_ENV "DLSSNR_HIP_BRIDGE"
 #define DLSSNR_HIP_ADDR_FILE "/tmp/dlssnr_hip_bridge.addr"
 
@@ -69,6 +69,18 @@ typedef struct {
     /* ABI 5: upstream 0.6.0 mapped (zero-copy) host status flag. */
     int (*p_hipHostMalloc)(void **ptr, u64 size, unsigned int flags);
     int (*p_hipHostGetDevicePointer)(void **devPtr, void *hostPtr, unsigned int flags);
+    /* ABI 6: upstream 0.8.0 (NeuralHub host) resolves these by name at first use. */
+    int (*p_hipCreateTextureObject)(void **tex, const void *res_desc, const void *tex_desc, const void *view_desc);
+    int (*p_hipDestroyTextureObject)(void *tex);
+    int (*p_hipEventDestroy)(void *event);
+    int (*p_hipHostFree)(void *ptr);
+    int (*p_hipMallocPitch)(void **ptr, u64 *pitch, u64 width, u64 height);
+    int (*p_hipMemcpy2D)(void *dst, u64 dpitch, const void *src, u64 spitch, u64 width, u64 height, int kind);
+    int (*p_hipMemcpyFromSymbol)(void *dst, const void *symbol, u64 bytes, u64 offset, int kind);
+    int (*p_hipMemset2D)(void *dst, u64 pitch, int value, u64 width, u64 height);
+    int (*p_hipMemset2DAsync)(void *dst, u64 pitch, int value, u64 width, u64 height, void *stream);
+    int (*p_hipMemsetD16Async)(void *dst, unsigned short value, u64 count, void *stream);
+    int (*p_hipStreamCreate)(void **stream);
 } DlssnrHipBridge;
 
 #endif

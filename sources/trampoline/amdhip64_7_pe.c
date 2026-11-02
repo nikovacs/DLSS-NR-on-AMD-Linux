@@ -349,6 +349,63 @@ EXPORT int hipHostGetDevicePointer(void **devPtr, void *hostPtr, unsigned int fl
     return ((int SYSV (*)(void **, void *, unsigned int))g->p_hipHostGetDevicePointer)(devPtr, hostPtr, flags);
 }
 
+/* ABI 6: upstream 0.8.0 resolves these by name at first use. */
+EXPORT int hipCreateTextureObject(void **tex, const void *res_desc, const void *tex_desc, const void *view_desc) {
+    if (!bridge_ok() || !g->p_hipCreateTextureObject) return HIP_ERROR_NOT_INITIALIZED;
+    return ((int SYSV (*)(void **tex, const void *res_desc, const void *tex_desc, const void *view_desc))g->p_hipCreateTextureObject)(tex, res_desc, tex_desc, view_desc);
+}
+
+EXPORT int hipDestroyTextureObject(void *tex) {
+    if (!bridge_ok() || !g->p_hipDestroyTextureObject) return HIP_ERROR_NOT_INITIALIZED;
+    return ((int SYSV (*)(void *tex))g->p_hipDestroyTextureObject)(tex);
+}
+
+EXPORT int hipEventDestroy(void *event) {
+    if (!bridge_ok() || !g->p_hipEventDestroy) return HIP_ERROR_NOT_INITIALIZED;
+    return ((int SYSV (*)(void *event))g->p_hipEventDestroy)(event);
+}
+
+EXPORT int hipHostFree(void *ptr) {
+    if (!bridge_ok() || !g->p_hipHostFree) return HIP_ERROR_NOT_INITIALIZED;
+    return ((int SYSV (*)(void *ptr))g->p_hipHostFree)(ptr);
+}
+
+EXPORT int hipMallocPitch(void **ptr, u64 *pitch, u64 width, u64 height) {
+    if (!bridge_ok() || !g->p_hipMallocPitch) return HIP_ERROR_NOT_INITIALIZED;
+    return ((int SYSV (*)(void **ptr, u64 *pitch, u64 width, u64 height))g->p_hipMallocPitch)(ptr, pitch, width, height);
+}
+
+EXPORT int hipMemcpy2D(void *dst, u64 dpitch, const void *src, u64 spitch, u64 width, u64 height, int kind) {
+    if (!bridge_ok() || !g->p_hipMemcpy2D) return HIP_ERROR_NOT_INITIALIZED;
+    return ((int SYSV (*)(void *dst, u64 dpitch, const void *src, u64 spitch, u64 width, u64 height, int kind))g->p_hipMemcpy2D)(dst, dpitch, src, spitch, width, height, kind);
+}
+
+EXPORT int hipMemcpyFromSymbol(void *dst, const void *symbol, u64 bytes, u64 offset, int kind) {
+    if (!bridge_ok() || !g->p_hipMemcpyFromSymbol) return HIP_ERROR_NOT_INITIALIZED;
+    return ((int SYSV (*)(void *dst, const void *symbol, u64 bytes, u64 offset, int kind))g->p_hipMemcpyFromSymbol)(dst, symbol, bytes, offset, kind);
+}
+
+EXPORT int hipMemset2D(void *dst, u64 pitch, int value, u64 width, u64 height) {
+    if (!bridge_ok() || !g->p_hipMemset2D) return HIP_ERROR_NOT_INITIALIZED;
+    return ((int SYSV (*)(void *dst, u64 pitch, int value, u64 width, u64 height))g->p_hipMemset2D)(dst, pitch, value, width, height);
+}
+
+EXPORT int hipMemset2DAsync(void *dst, u64 pitch, int value, u64 width, u64 height, void *stream) {
+    if (!bridge_ok() || !g->p_hipMemset2DAsync) return HIP_ERROR_NOT_INITIALIZED;
+    return ((int SYSV (*)(void *dst, u64 pitch, int value, u64 width, u64 height, void *stream))g->p_hipMemset2DAsync)(dst, pitch, value, width, height, stream);
+}
+
+EXPORT int hipMemsetD16Async(void *dst, unsigned short value, u64 count, void *stream) {
+    if (!bridge_ok() || !g->p_hipMemsetD16Async) return HIP_ERROR_NOT_INITIALIZED;
+    return ((int SYSV (*)(void *dst, unsigned short value, u64 count, void *stream))g->p_hipMemsetD16Async)(dst, value, count, stream);
+}
+
+EXPORT int hipStreamCreate(void **stream) {
+    if (!bridge_ok() || !g->p_hipStreamCreate) return HIP_ERROR_NOT_INITIALIZED;
+    return ((int SYSV (*)(void **stream))g->p_hipStreamCreate)(stream);
+}
+
+
 EXPORT int hipStreamSynchronize(void *stream) {
     if (!bridge_ok() || !g->p_hipStreamSynchronize) return HIP_ERROR_NOT_INITIALIZED;
     return ((int SYSV (*)(void *))g->p_hipStreamSynchronize)(stream);
