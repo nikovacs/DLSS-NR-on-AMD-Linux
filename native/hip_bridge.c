@@ -33,6 +33,40 @@ static void *g_flag_set;
 static void *g_k_export;
 static void *g_k_import;
 static void *g_k_expo;  /* 0.6.0 k_expo_resolve: may open the work stream before k_import */
+/* Several copies of the runtime can live in one process: AMDNR's "Neural passes" loads
+ * dlssnr_amd_pass1..3.dll, each registering its own k_flag_wait/k_flag_set/... host stubs.
+ * The g_* slots keep the first copy's stub; later copies are remembered here. Overwriting
+ * the slot made the first copy's k_flag_wait unrecognised: it launched natively, spun on
+ * the GPU for a flag vkd3d never released, and the frame timed out (device removed). */
+enum { NR_ROLE_FLAG_WAIT, NR_ROLE_FLAG_SET, NR_ROLE_EXPORT, NR_ROLE_IMPORT, NR_ROLE_EXPO, NR_ROLES };
+#define NR_EXTRA_COPIES 7
+static void *g_role_extra[NR_ROLES][NR_EXTRA_COPIES];
+static void **nr_role_slot(int role) {
+    switch (role) {
+    case NR_ROLE_FLAG_WAIT: return &g_flag_wait;
+    case NR_ROLE_FLAG_SET: return &g_flag_set;
+    case NR_ROLE_EXPORT: return &g_k_export;
+    case NR_ROLE_IMPORT: return &g_k_import;
+    default: return &g_k_expo;
+    }
+}
+/* Registration runs under the loader lock of each copy; copies load one at a time. */
+static int nr_role_add(int role, void *hf) {
+    void **slot = nr_role_slot(role);
+    if (!*slot || *slot == hf) { *slot = hf; return 0; }
+    for (unsigned i = 0; i < NR_EXTRA_COPIES; ++i) {
+        if (g_role_extra[role][i] == hf) return i + 1;
+        if (!g_role_extra[role][i]) { g_role_extra[role][i] = hf; return i + 1; }
+    }
+    return -1;
+}
+static int nr_is_role(int role, const void *f) {
+    if (!f) return 0;
+    if (*nr_role_slot(role) == f) return 1;
+    for (unsigned i = 0; i < NR_EXTRA_COPIES && g_role_extra[role][i]; ++i)
+        if (g_role_extra[role][i] == f) return 1;
+    return 0;
+}
 static void *g_done_event;
 static int (*p_hipStreamSynchronize)(void *stream);
 static int (*p_hipImportExternalSemaphore)(void **out, const void *desc);
@@ -695,21 +729,13 @@ static void stub_reg_fn(void **mo, const void *hf, char *df, const char *dn, uns
 #else
         if (!strcmp(dn, C32_NAME)) c32_original=hf;
 #endif
-        if (strstr(dn, "k_flag_wait")) {
-            g_flag_wait = (void *)hf;
-            logmsg("kernel %s hf=%p", dn, hf);
-        } else if (strstr(dn, "k_flag_set")) {
-            g_flag_set = (void *)hf;
-            logmsg("kernel %s hf=%p", dn, hf);
-        } else if (strstr(dn, "k_export")) {
-            g_k_export = (void *)hf;
-            logmsg("kernel %s hf=%p", dn, hf);
-        } else if (strstr(dn, "k_import")) {
-            g_k_import = (void *)hf;
-            logmsg("kernel %s hf=%p", dn, hf);
-        } else if (strstr(dn, "k_expo_resolve")) {
-            g_k_expo = (void *)hf;
-            logmsg("kernel %s hf=%p", dn, hf);
+        int role = strstr(dn, "k_flag_wait") ? NR_ROLE_FLAG_WAIT : strstr(dn, "k_flag_set") ? NR_ROLE_FLAG_SET
+                 : strstr(dn, "k_export") ? NR_ROLE_EXPORT : strstr(dn, "k_import") ? NR_ROLE_IMPORT
+                 : strstr(dn, "k_expo_resolve") ? NR_ROLE_EXPO : -1;
+        if (role >= 0) {
+            int copy = nr_role_add(role, (void *)hf);
+            if (copy < 0) logmsg("kernel %s hf=%p NOT tracked: more than %d runtime copies", dn, hf, NR_EXTRA_COPIES + 1);
+            else logmsg("kernel %s hf=%p copy=%d", dn, hf, copy + 1);
         }
     }
 }
@@ -827,11 +853,11 @@ static int stub_launch(const void *f, dim3_t nb, dim3_t db, void **a, u64 sh, vo
     /* Do not launch HIP k_flag_wait first on the null stream: it would spin
      * before NR kernels and deadlock. Do not DeviceSynchronize here either
      * (queue still empty → 0 ms, then kernels run after residual). */
-    if (g_flag_wait && f == g_flag_wait)
+    if (nr_is_role(NR_ROLE_FLAG_WAIT, f))
         return nr_begin_job(a, st);
     if (nr_job.error)
         return nr_job.error;
-    if (g_k_import && f == g_k_import && !nr_job.active)
+    if (nr_is_role(NR_ROLE_IMPORT, f) && !nr_job.active)
         return 3;
     if (nr_job.active && (e = nr_route_job_launch(f, st))) {
         logmsg("ordered launch refused token=%llu frame=%u kernel=%p marker=%p work=%p got=%p err=%d",
@@ -839,7 +865,7 @@ static int stub_launch(const void *f, dim3_t nb, dim3_t db, void **a, u64 sh, vo
                nr_job.stream, nr_job.work_stream, st, e);
         return e;
     }
-    if (g_flag_set && f == g_flag_set) {
+    if (nr_is_role(NR_ROLE_FLAG_SET, f)) {
         e = nr_seal_job(a, st);
         if (e) return e;
         /* Keep the original completion/abort stores on the marker stream.
@@ -859,7 +885,7 @@ static int stub_launch(const void *f, dim3_t nb, dim3_t db, void **a, u64 sh, vo
     if (g_nlaunch_log < 24) {
         g_nlaunch_log++;
         logmsg("launch #%u f=%p grid=%u,%u,%u block=%u,%u,%u st=%p set=%d exp=%d", g_nlaunch_log, f, nb.x,
-               nb.y, nb.z, db.x, db.y, db.z, st, f == g_flag_set, f == g_k_export);
+               nb.y, nb.z, db.x, db.y, db.z, st, nr_is_role(NR_ROLE_FLAG_SET, f), nr_is_role(NR_ROLE_EXPORT, f));
     }
     if (c32_requested() && f==c32_original && nr_job.active) c32_frame(nr_job.token,nr_job.frame);
     if (!c32_try_launch(f,nb,db,a,sh,st,&e))

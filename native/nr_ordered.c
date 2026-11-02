@@ -180,18 +180,65 @@ static int NR_SYSV nr_snapshot(uint64_t device, struct nr_buffer *out, uint32_t 
     } else *count = n;
     return rc;
 }
+/* Is any in-flight HIP job (publish_input .. completion) or quarantined job pinning `token`? */
+static int nr_token_pinned(uint64_t token) {
+    for (struct nr_pin_bundle *b = nr_pin_bundles; b; b = b->next)
+        for (uint32_t i = 0; i < b->count; ++i)
+            if (b->buffers[i].token == token) return 1;
+    return 0;
+}
+/* Queue affinity with handover. A resource is bound to the queue whose ordered
+ * submission last claimed it. Another queue may take it over once no in-flight
+ * HIP job pins it: the HIP work of a boundary runs inside its own queue's
+ * command list (after the prefix, before the suffix), so the application's own
+ * cross-queue fences order it exactly as they order the rest of that list.
+ * AMDNR submits from more than one queue (one per Neural pass, and a new one
+ * after an NR-resolution change); permanent affinity refused those claims and
+ * removed the device. While a job on the old queue is in flight the claim waits
+ * for it (bounded): that job already has its inputs and never waits on this
+ * queue, so the wait cannot deadlock. Validation stays all-or-none. */
+#define NR_HANDOVER_WAIT_MS 2000u
 static int NR_SYSV nr_claim_queue(const struct nr_buffer *buffers, uint32_t count, uint64_t queue) {
+    static unsigned handovers;
     int rc = 0;
+    struct timespec deadline;
     if (!queue || !buffers || !count || count > NR_ORDERED_MAX_RESOURCES) return 1;
+    clock_gettime(CLOCK_MONOTONIC, &deadline);
+    deadline.tv_sec += NR_HANDOVER_WAIT_MS / 1000u;
+    deadline.tv_nsec += (long)(NR_HANDOVER_WAIT_MS % 1000u) * 1000000L;
+    if (deadline.tv_nsec >= 1000000000L) { deadline.tv_sec++; deadline.tv_nsec -= 1000000000L; }
     pthread_mutex_lock(&nr_mutex);
-    for (uint32_t i = 0; i < count; ++i) {
-        struct nr_resource_state *r = nr_find_token(buffers[i].token);
-        if (!r || r->probe_busy || r->buffer != buffers[i].buffer || r->size != buffers[i].size ||
-                r->owner != buffers[i].owner || r->release != buffers[i].release ||
-                (r->queue && r->queue != queue)) { rc = 1; break; }
+    for (;;) {
+        int wait = 0;
+        for (uint32_t i = 0; i < count && !rc && !wait; ++i) {
+            struct nr_resource_state *r = nr_find_token(buffers[i].token);
+            const char *why = !r ? "unknown token" : r->probe_busy ? "startup probe busy"
+                : (r->buffer != buffers[i].buffer || r->size != buffers[i].size || r->owner != buffers[i].owner ||
+                   r->release != buffers[i].release) ? "snapshot differs from registry" : NULL;
+            if (why) {
+                logmsg("claim refused queue=%llu token=%llu (%u of %u): %s",
+                       (unsigned long long)queue, (unsigned long long)buffers[i].token, i + 1, count, why);
+                rc = 1;
+            } else if (r->queue && r->queue != queue && nr_token_pinned(r->token)) {
+                wait = 1;
+            }
+        }
+        if (rc || !wait) break;
+        if (pthread_cond_clockwait(&nr_condition, &nr_mutex, CLOCK_MONOTONIC, &deadline)) {
+            logmsg("claim refused queue=%llu: a job of another queue still holds its resources after %u ms",
+                   (unsigned long long)queue, NR_HANDOVER_WAIT_MS);
+            rc = 1;
+            break;
+        }
     }
     if (!rc)
-        for (uint32_t i = 0; i < count; ++i) nr_find_token(buffers[i].token)->queue = queue;
+        for (uint32_t i = 0; i < count; ++i) {
+            struct nr_resource_state *r = nr_find_token(buffers[i].token);
+            if (r->queue && r->queue != queue && handovers++ < 16)
+                logmsg("queue handover token=%llu queue %llu -> %llu", (unsigned long long)r->token,
+                       (unsigned long long)r->queue, (unsigned long long)queue);
+            r->queue = queue;
+        }
     pthread_mutex_unlock(&nr_mutex);
     return rc;
 }
@@ -362,14 +409,15 @@ static int nr_try_startup_probe(const void *f, dim3_t grid, dim3_t block,
     void *flags, *abort_buffer;
     uint32_t frame, limit;
     unsigned kind = 0;
-    if (!f || (f != g_flag_wait && f != g_flag_set)) return 0;
+    int is_wait = nr_is_role(NR_ROLE_FLAG_WAIT, f);
+    if (!is_wait && !nr_is_role(NR_ROLE_FLAG_SET, f)) return 0;
     if (!args || !args[0] || !args[1] || !args[2] || shared || stream ||
             grid.x != 1 || grid.y != 1 || grid.z != 1 ||
             block.x != 32 || block.y != 1 || block.z != 1)
         return 0;
     memcpy(&flags, args[0], sizeof(flags));
     memcpy(&frame, args[1], sizeof(frame));
-    if (f == g_flag_wait) {
+    if (is_wait) {
         memcpy(&limit, args[2], sizeof(limit));
         if (!frame && limit == 1) kind = 1;
         else if (frame == UINT32_C(0x40000000) && limit == 1500000) kind = 3;
@@ -417,6 +465,7 @@ static int nr_try_startup_probe(const void *f, dim3_t grid, dim3_t block,
         while (*p != pins) p = &(*p)->next;
         *p = pins->next;
         resource->probe_busy = 0;
+        pthread_cond_broadcast(&nr_condition); /* a queue handover may wait on these pins */
         pthread_mutex_unlock(&nr_mutex);
         nr_release_pins(pins);
     }
@@ -480,14 +529,14 @@ static int nr_job_error(int error) {
  */
 static int nr_route_job_launch(const void *f, void *stream) {
     if (nr_job.sealed) return nr_job_error(1);
-    if (f == g_flag_set)
+    if (nr_is_role(NR_ROLE_FLAG_SET, f))
         return stream == nr_job.stream ? 0 : nr_job_error(1);
     if (nr_job.work_bound)
         return stream == nr_job.work_stream ? 0 : nr_job_error(1);
     /* The first work-queue kernel of a job reads game inputs after the
      * producer handoff: k_import, or since upstream 0.6.0 k_expo_resolve
      * (FreshExposure reads the frame's exposure texture before k_import). */
-    if (f != g_k_import && !(g_k_expo && f == g_k_expo))
+    if (!nr_is_role(NR_ROLE_IMPORT, f) && !nr_is_role(NR_ROLE_EXPO, f))
         return stream == nr_job.stream ? 0 : nr_job_error(1);
     /* Only the reviewed null-marker -> explicit-work transition is supported.
      * Drain the marker queue before launching work on another queue, so any

@@ -4,3 +4,5 @@ GetEnvironmentVariableA
 CreateFileA
 WriteFile
 CloseHandle
+LoadLibraryA
+GetProcAddress

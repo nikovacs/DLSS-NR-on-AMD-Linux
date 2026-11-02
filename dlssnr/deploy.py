@@ -316,6 +316,27 @@ def flatpak_steam_home(exe, home=None):
     return None
 
 
+def runner_belongs_to_game_steam(runner, exe, home=None):
+    """Whether a Wine/Proton runner can be the one this game's Steam uses.
+
+    Native and Flatpak Steam keep separate Proton installs; listing both offered
+    runners the game never runs with. A Flatpak Steam game: its runners live under
+    Flatpak Steam's home or in a library its libraryfolders.vdf lists. Any other
+    game: everything except Flatpak Steam's private home (system runners count).
+    Shared external libraries count for both."""
+    flatpak = flatpak_steam_home(exe, home)
+    runner = Path(runner).resolve()
+    home = Path(home or FLATPAK_STEAM_HOME).resolve()
+    if flatpak is None:
+        return not runner.is_relative_to(home)
+    allowed = [Path(flatpak).resolve()]
+    steam = Path(flatpak) / '.local/share/Steam'
+    if steam.is_dir():
+        from .games import _libraries
+        allowed.extend(_libraries(steam.resolve()))
+    return any(runner.is_relative_to(root) for root in allowed)
+
+
 def data_base(exe=None):
     """Root that holds dlssnr-linux data (ROCm venv, bridge cache) for this game."""
     flatpak = flatpak_steam_home(exe) if exe is not None else None

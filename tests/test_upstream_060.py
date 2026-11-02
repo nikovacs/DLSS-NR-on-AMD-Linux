@@ -121,6 +121,40 @@ class FlatpakSteam(unittest.TestCase):
                 % (home/'.local/share/Steam', library))
             self.assertEqual(deploy.flatpak_steam_home(exe, home), home)
 
+    def test_runner_list_matches_the_games_steam(self):
+        with tempfile.TemporaryDirectory() as d:
+            d = Path(d)
+            home = d/'.var/app/com.valvesoftware.Steam'
+            fp_steam = home/'.local/share/Steam'
+            shared = d/'mnt/SteamLibrary'
+            fp_game = fp_steam/'steamapps/common/Game/Game.exe'
+            native_game = d/'.local/share/Steam/steamapps/common/Other/Other.exe'
+            shared_game = shared/'steamapps/common/Shared/Shared.exe'
+            for exe in (fp_game, native_game, shared_game):
+                exe.parent.mkdir(parents=True); exe.write_bytes(b'MZ')
+            (fp_steam/'steamapps/libraryfolders.vdf').write_text(
+                '"libraryfolders"\n{\n "0"\n {\n  "path" "%s"\n }\n "1"\n {\n  "path" "%s"\n }\n}\n'
+                % (fp_steam, shared))
+            fp_proton = fp_steam/'steamapps/common/Proton - Experimental'
+            native_proton = d/'.local/share/Steam/steamapps/common/Proton - Experimental'
+            shared_proton = shared/'steamapps/common/Proton 10.0'
+            system_proton = d/'usr/share/steam/compatibilitytools.d/proton-system'
+            for p in (fp_proton, native_proton, shared_proton, system_proton):
+                p.mkdir(parents=True)
+            ok = lambda runner, exe: deploy.runner_belongs_to_game_steam(runner, exe, home)
+            # Flatpak game: its own Proton and shared libraries only (the reported bug: native listed too).
+            self.assertTrue(ok(fp_proton, fp_game))
+            self.assertTrue(ok(shared_proton, fp_game))
+            self.assertFalse(ok(native_proton, fp_game))
+            self.assertFalse(ok(system_proton, fp_game))
+            # Native game: anything outside Flatpak Steam's private home.
+            self.assertTrue(ok(native_proton, native_game))
+            self.assertTrue(ok(system_proton, native_game))
+            self.assertFalse(ok(fp_proton, native_game))
+            # A game in a library Flatpak Steam lists is treated as Flatpak's.
+            self.assertTrue(ok(shared_proton, shared_game))
+            self.assertFalse(ok(native_proton, shared_game))
+
     def test_no_flatpak_install(self):
         with tempfile.TemporaryDirectory() as d:
             self.assertIsNone(deploy.flatpak_steam_home(Path(d)/'x.exe', Path(d)/'missing'))

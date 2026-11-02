@@ -20,6 +20,8 @@ __declspec(dllimport) HANDLE __stdcall CreateFileA(const char *name, DWORD acc, 
                                                    DWORD disp, DWORD attr, HANDLE tmpl);
 __declspec(dllimport) BOOL __stdcall WriteFile(HANDLE h, const void *buf, DWORD n, DWORD *w, void *ov);
 __declspec(dllimport) BOOL __stdcall CloseHandle(HANDLE h);
+__declspec(dllimport) HANDLE __stdcall LoadLibraryA(const char *name);
+__declspec(dllimport) void *__stdcall GetProcAddress(HANDLE module, const char *name);
 
 static DlssnrHipBridge *g;
 
@@ -169,10 +171,50 @@ EXPORT int hipSetDevice(int device) {
     return ((int SYSV (*)(int))g->p_hipSetDevice)(device);
 }
 
+/* Linux HIP has no Windows adapter identity: its hipDeviceProp_tR0600 LUID (offset 272)
+ * is zero. Hosts that pair HIP with D3D12 by LUID (AMDNR) then find no device. Wine
+ * assigns the D3D12/DXGI adapter LUIDs itself; with exactly one adapter there is only
+ * one possible pairing, so report that LUID. Several adapters: leave it zero (the host
+ * reports the mismatch) rather than guess. */
+typedef struct { unsigned int hAdapter; unsigned int lo; int hi; unsigned int sources; BOOL precise; } KmtAdapterInfo;
+typedef struct { unsigned int count; KmtAdapterInfo *adapters; } KmtEnumAdapters2;
+
+static int single_adapter_luid(unsigned char luid[8]) {
+    HANDLE gdi = LoadLibraryA("gdi32.dll");
+    long (__stdcall *enum2)(KmtEnumAdapters2 *) =
+        gdi ? (long (__stdcall *)(KmtEnumAdapters2 *))GetProcAddress(gdi, "D3DKMTEnumAdapters2") : 0;
+    KmtAdapterInfo info[8];
+    KmtEnumAdapters2 query = {8, info};
+    if (!enum2 || enum2(&query) != 0 || query.count != 1)
+        return 0;
+    __builtin_memcpy(luid, &info[0].lo, 4);
+    __builtin_memcpy(luid + 4, &info[0].hi, 4);
+    return 1;
+}
+
 EXPORT int hipGetDevicePropertiesR0600(void *prop, int deviceId) {
     if (!bridge_ok() || !g->p_hipGetDevicePropertiesR0600)
         return HIP_ERROR_NOT_INITIALIZED;
-    return ((int SYSV (*)(void *, int))g->p_hipGetDevicePropertiesR0600)(prop, deviceId);
+    int rc = ((int SYSV (*)(void *, int))g->p_hipGetDevicePropertiesR0600)(prop, deviceId);
+    unsigned char *p = (unsigned char *)prop, luid[8], any = 0;
+    for (int i = 0; p && i < 8; ++i)
+        any |= p[272 + i];
+    if (!rc && p && !any && single_adapter_luid(luid)) {
+        unsigned int node_mask = 1;
+        __builtin_memcpy(p + 272, luid, 8);
+        __builtin_memcpy(p + 280, &node_mask, 4);
+    }
+    return rc;
+}
+
+/* Daniel's runtime never calls hipInit; AMDNR's HIP probe does. Linux HIP initialises
+ * on first use, which hipGetDeviceCount performs through the bridge (no ABI change). */
+EXPORT int hipInit(unsigned int flags) {
+    int count = 0, rc;
+    if (flags)
+        return 1; /* hipErrorInvalidValue: HIP accepts only 0 */
+    rc = hipGetDeviceCount(&count);
+    return rc ? rc : count ? 0 : 100; /* hipErrorNoDevice */
 }
 
 EXPORT int hipDriverGetVersion(int *driverVersion) {

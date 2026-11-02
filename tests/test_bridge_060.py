@@ -59,9 +59,9 @@ int main(void) {
             exe = Path(d)/'ordered-060'
             subprocess.run(GCC + [str(ROOT/'tests/ordered_060_contract.c'), '-ldl', '-o', str(exe)],
                            check=True, capture_output=True, timeout=30)
-            for scenario in range(4):
+            for scenario in range(8):
                 with self.subTest(scenario=scenario):
-                    subprocess.run([str(exe), str(scenario)], check=True, capture_output=True, timeout=5,
+                    subprocess.run([str(exe), str(scenario)], check=True, capture_output=True, timeout=15,
                                    env=dict(os.environ, ASAN_OPTIONS='detect_leaks=0'))
 
 

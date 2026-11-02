@@ -256,7 +256,10 @@ def check_host(manifest):
 
 def _available_protons(args):
     valid, errors = [], []
+    exe = getattr(args, '_game_exe', None)
     for candidate in games.discover_protons(args.steam_root):
+        if exe is not None and not deploy.runner_belongs_to_game_steam(candidate, exe):
+            continue  # the other Steam install's runner: this game never runs with it
         try:
             valid.append(games.validate_proton(candidate))
         except RuntimeError as exc:

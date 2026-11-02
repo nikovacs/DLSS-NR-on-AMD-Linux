@@ -34,8 +34,9 @@ struct nr_ordered_api {
     int (NR_SYSV *lookup_va)(uint64_t device, uint64_t va, uint64_t *token);
     /* Success transfers one pin per entry; failure returns count=0 and rolls back. */
     int (NR_SYSV *snapshot)(uint64_t device, struct nr_buffer *out, uint32_t capacity, uint32_t *count);
-    /* All-or-none permanent logical queue affinity until resource retirement.
-     * Queue IDs must be nonzero, unique, never reused; call BEFORE any prefix. */
+    /* All-or-none logical queue affinity. Another queue takes a resource over once no
+     * in-flight HIP job pins it (waits, bounded, while one does). Queue IDs must be
+     * nonzero, unique, never reused; call BEFORE any prefix. */
     int (NR_SYSV *claim_queue)(const struct nr_buffer *buffers, uint32_t count, uint64_t queue);
     int (NR_SYSV *retire_resource)(uint64_t device, uint64_t va);
     /* Independent HIP pins for EXACT producer barriers; caller keeps its pins. */

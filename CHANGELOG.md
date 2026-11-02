@@ -23,6 +23,21 @@
   (`gfx103X`, `gfx110X`, `gfx120X`, same pinned ROCm version) from the kernel's
   KFD topology.
 - Flatpak Steam: keep runtime and bridge inside Flatpak Steam's home.
+- Runner list: offer only the Proton/Wine runners of the Steam installation that
+  owns the game (native and Flatpak Steam keep separate runners).
+- Several runtime copies in one process (AMDNR "Neural passes" loads
+  `dlssnr_amd_pass1..3.dll`): kernel roles are tracked per copy. A second copy
+  overwrote the first copy's `k_flag_wait`, which then ran unmanaged until the
+  2 s timeout and removed the device.
+- Queue affinity hands a resource over to another queue once no in-flight job
+  pins it (bounded wait while one does) instead of refusing the claim and
+  removing the device. Refused claims now log their reason.
+- Trampoline: `hipInit`, and the adapter LUID in `hipGetDevicePropertiesR0600`
+  when Linux HIP reports none and Wine has exactly one adapter (hosts such as
+  AMDNR pair HIP with D3D12 by LUID).
+- Checked with AMDNR 0.3.5.8R11 hosting upstream 0.6.0 (Hogwarts Legacy, RX 6800
+  XT): neural rendering runs; live NR-resolution, interleave and Neural-passes
+  changes work (15,209 frames, no device removal).
 - Checked: Hogwarts Legacy (FSR 3) on RX 6800 XT / gfx1030, Flatpak Steam,
   Proton Experimental, Fast arithmetic: neural rendering runs, about 121 ms of
   network time per frame at 3414x961 render resolution (5120x1440, FSR Quality).
